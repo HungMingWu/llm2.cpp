@@ -7,7 +7,9 @@ endif()
 
 find_package(OpenMP REQUIRED) 
 
+add_subdirectory(base)
 add_subdirectory(models)
+add_subdirectory(cpu_backend)
 
 add_executable(demo)
 target_sources(demo
@@ -27,7 +29,6 @@ target_compile_options(demo PRIVATE
 )
 
 target_link_libraries(demo PRIVATE
-  OpenMP::OpenMP_CXX
-  m
+  libcpu_backend
   libmodels
 )

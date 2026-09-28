@@ -10,3 +10,7 @@ PUBLIC
 )
 
 target_compile_features(libmodels PUBLIC cxx_std_26) 
+target_link_libraries(libmodels
+PRIVATE
+  libbase
+)

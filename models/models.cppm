@@ -1,18 +1,12 @@
 module;
-#include <cstdint>
-
-export module models;
 #define VOCAB_SIZE 262144
 #define NUM_LAYERS 35
 
+export module models;
+import base;
+
 export
 {
-  struct Tensor {
-      void *data;
-      uint16_t *scales;
-      int shape[4];
-  };
-
   struct LayerWeights {
     Tensor input_layernorm;
     Tensor layer_scalar;
