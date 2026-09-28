@@ -159,6 +159,12 @@ struct ModelWeights {
     Tensor gelu_table;
 };
 
+struct Model {
+    char magic[4];
+    Tokenizer tokenizer;
+    ModelWeights weights;
+};
+
 struct InferenceState {
     float residual[BATCH_SIZE * HIDDEN_SIZE];                           // Carries each token's hidden state through all 35 layers.
     float hidden[BATCH_SIZE * 8 * HIDDEN_SIZE];                         // Reused for intermediate results and sized for the largest 12,288-value MLP output.
@@ -169,12 +175,8 @@ struct InferenceState {
     float sliding_cache[3][4][2 * (SLIDING_WINDOW + BATCH_SIZE) * 256]; // Keeps the previous window and current batch for twelve sliding KV caches.
     float full_cache[3][2 * MAX_CONTEXT * 512];                         // Holds the complete context for three 512-wide full-attention KV caches.
     int token_ids[MAX_CONTEXT];                                         // Holds the tokenized prompt before prefill.
-};
-
-struct Model {
-    char magic[4];
-    Tokenizer tokenizer;
-    ModelWeights weights;
+public:
+    void forward(Model *model, const int *tokens, size_t token_count, int start_pos);
 };
 
 // Verifies that the compiler laid out the memory-mapped model exactly as the exporter expects.
@@ -465,50 +467,50 @@ void attention(InferenceState *state, const LayerWeights *layers, int layer,
     matmul_int8(state->hidden, state->quantized, state->activation_scales, &weights->o_proj, token_count);
 }
 
-void forward(Model *model, InferenceState *state, const int *tokens, size_t token_count, int start_pos) {
+void InferenceState::forward(Model *model, const int *tokens, size_t token_count, int start_pos) {
     int per_layer_width = model->weights.per_layer_projection_norm.shape[0];
     // One OpenMP team stays alive for the full forward pass while each kernel divides its own loop.
     #pragma omp parallel num_threads(thread_count())
     {
     float scores[(size_t)start_pos + token_count]; // Each thread needs private scratch large enough for every visible key.
-    embedding(state->residual, &model->weights.embed, tokens, token_count, sqrtf((float)HIDDEN_SIZE));
+    embedding(residual, &model->weights.embed, tokens, token_count, sqrtf((float)HIDDEN_SIZE));
 
     // Build the token-conditioned input that each transformer layer will receive.
-    quantize(state->quantized, state->activation_scales, state->residual, token_count, HIDDEN_SIZE);
-    matmul_int8(state->per_layer_inputs, state->quantized, state->activation_scales, &model->weights.per_layer_model_projection, token_count);
-    rmsnorm(state->per_layer_inputs, state->per_layer_inputs, &model->weights.per_layer_projection_norm, per_layer_width, 1e-6f * HIDDEN_SIZE, token_count * NUM_LAYERS);
+    quantize(quantized, activation_scales, residual, token_count, HIDDEN_SIZE);
+    matmul_int8(per_layer_inputs, quantized, activation_scales, &model->weights.per_layer_model_projection, token_count);
+    rmsnorm(per_layer_inputs, per_layer_inputs, &model->weights.per_layer_projection_norm, per_layer_width, 1e-6f * HIDDEN_SIZE, token_count * NUM_LAYERS);
 
-    embedding(state->hidden, &model->weights.embed_per_layer, tokens, token_count, sqrtf((float)per_layer_width));
-    add_and_scale(state->per_layer_inputs, state->hidden, token_count * NUM_LAYERS * per_layer_width, 1.0f / sqrtf(2.0f)); 
+    embedding(hidden, &model->weights.embed_per_layer, tokens, token_count, sqrtf((float)per_layer_width));
+    add_and_scale(per_layer_inputs, hidden, token_count * NUM_LAYERS * per_layer_width, 1.0f / sqrtf(2.0f)); 
 
     for (int layer = 0; layer < NUM_LAYERS; layer++) {
         LayerWeights *weights = &model->weights.layers[layer];
 
         // Attention, normalized and added back onto the residual stream.
-        rmsnorm(state->hidden, state->residual, &weights->input_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-        attention(state, model->weights.layers, layer, start_pos, token_count, scores);
-        rmsnorm(state->hidden, state->hidden, &weights->post_attn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-        add_and_scale(state->residual, state->hidden, token_count * HIDDEN_SIZE, 1.0f);
+        rmsnorm(hidden, residual, &weights->input_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
+        attention(this, model->weights.layers, layer, start_pos, token_count, scores);
+        rmsnorm(hidden, hidden, &weights->post_attn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
+        add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, 1.0f);
 
         // Feed-forward network, down(gelu(gate) * up), quantizing activations to int8 before each matmul.
-        rmsnorm(state->hidden, state->residual, &weights->pre_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-        quantize(state->quantized, state->activation_scales, state->hidden, token_count, weights->gate_proj.shape[1]);
-        matmul_int8(state->hidden, state->quantized, state->activation_scales, &weights->gate_proj, token_count);
-        matmul_int8(state->auxiliary, state->quantized, state->activation_scales, &weights->up_proj, token_count);
-        geglu(state->hidden, state->auxiliary, token_count, weights->gate_proj.shape[0], weights->gate_proj.shape[0], &model->weights.gelu_table);
-        quantize(state->quantized, state->activation_scales, state->hidden, token_count, weights->down_proj.shape[1]);
-        matmul_int8(state->hidden, state->quantized, state->activation_scales, &weights->down_proj, token_count);
-        rmsnorm(state->hidden, state->hidden, &weights->post_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-        add_and_scale(state->residual, state->hidden, token_count * HIDDEN_SIZE, 1.0f);
+        rmsnorm(hidden, residual, &weights->pre_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
+        quantize(quantized, activation_scales, hidden, token_count, weights->gate_proj.shape[1]);
+        matmul_int8(hidden, quantized, activation_scales, &weights->gate_proj, token_count);
+        matmul_int8(auxiliary, quantized, activation_scales, &weights->up_proj, token_count);
+        geglu(hidden, auxiliary, token_count, weights->gate_proj.shape[0], weights->gate_proj.shape[0], &model->weights.gelu_table);
+        quantize(quantized, activation_scales, hidden, token_count, weights->down_proj.shape[1]);
+        matmul_int8(hidden, quantized, activation_scales, &weights->down_proj, token_count);
+        rmsnorm(hidden, hidden, &weights->post_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
+        add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, 1.0f);
 
         // This layer's per-layer embedding row, gated and added with a learned scale.
-        quantize(state->quantized, state->activation_scales, state->residual, token_count, HIDDEN_SIZE);
-        matmul_int8(state->hidden, state->quantized, state->activation_scales, &weights->per_layer_input_gate, token_count);
-        geglu(state->hidden, state->per_layer_inputs + layer * per_layer_width, token_count, per_layer_width, NUM_LAYERS * per_layer_width, &model->weights.gelu_table);
-        quantize(state->quantized, state->activation_scales, state->hidden, token_count, weights->per_layer_projection.shape[1]);
-        matmul_int8(state->hidden, state->quantized, state->activation_scales, &weights->per_layer_projection, token_count);
-        rmsnorm(state->hidden, state->hidden, &weights->post_per_layer_input_norm, HIDDEN_SIZE, 1e-6f, token_count);
-        add_and_scale(state->residual, state->hidden, token_count * HIDDEN_SIZE, ((float *)weights->layer_scalar.data)[0]);
+        quantize(quantized, activation_scales, residual, token_count, HIDDEN_SIZE);
+        matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_input_gate, token_count);
+        geglu(hidden, per_layer_inputs + layer * per_layer_width, token_count, per_layer_width, NUM_LAYERS * per_layer_width, &model->weights.gelu_table);
+        quantize(quantized, activation_scales, hidden, token_count, weights->per_layer_projection.shape[1]);
+        matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_projection, token_count);
+        rmsnorm(hidden, hidden, &weights->post_per_layer_input_norm, HIDDEN_SIZE, 1e-6f, token_count);
+        add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, ((float *)weights->layer_scalar.data)[0]);
     }
     }
 }
@@ -568,7 +570,7 @@ int sample(float *logits, int vocab_size, float temperature) {
 void prefill(Model *model, InferenceState *state, const int *tokens, int token_count, int dump_logits) {
     for (int position = 0; position < token_count; position += BATCH_SIZE) {
         int chunk = token_count - position < BATCH_SIZE ? token_count - position : BATCH_SIZE;
-        forward(model, state, tokens + position, chunk, position);
+        state->forward(model, tokens + position, chunk, position);
         if (dump_logits) {
             for (int i = 0; i < chunk; i++) {
                 fwrite(logits(model, state, i), sizeof(float), VOCAB_SIZE, stdout);
@@ -607,7 +609,7 @@ void generate(Model *model, InferenceState *state, const char *prompt, int max_n
 
         fputs(token_text(tokenizer, next_token), stdout);
         fflush(stdout);
-        forward(model, state, &next_token, 1, position);
+        state->forward(model, &next_token, 1, position);
     }
     putchar('\n');
 }
@@ -642,7 +644,7 @@ void benchmark(Model *model, InferenceState *state, int prefill_tokens, int gene
         const int token = 2;
         double start = time_seconds();
         for (int position = prefill_tokens; position < prefill_tokens + generated_tokens; position++) {
-            forward(model, state, &token, 1, position);
+            state->forward(model, &token, 1, position);
             (void)logits(model, state, 0);
         }
         printf("tg%d@d%d %.2f tok/s\n", generated_tokens, prefill_tokens, (double)generated_tokens / (time_seconds() - start));
