@@ -243,16 +243,6 @@ void apply_rope(const Tensor *cosines, const Tensor *sines, float *vectors,
     }
 }
 
-void softmax(float *values, int count) {
-    float max = values[0], sum = 1.0f;
-    for (int i = 1; i < count; i++) {
-        if (values[i] > max) { sum = sum * expf(max - values[i]) + 1.0f; max = values[i]; } // Rescale the sum when a new maximum appears so expf() stays in range.
-        else sum += expf(values[i] - max);
-    }
-    
-    for (int i = 0; i < count; i++) values[i] = expf(values[i] - max) / sum;
-}
-
 // Builds queries, updates the KV cache, and computes causal attention over 512 tokens or the full context while shared layers reuse the latest compatible cache.
 void attention(InferenceState *state, const LayerWeights *layers, int layer,
                int start_pos, size_t token_count, float *scores) {
