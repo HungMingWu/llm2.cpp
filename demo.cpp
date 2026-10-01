@@ -19,10 +19,10 @@
 #include <unistd.h>
 #endif
 
-#include <cpuid.h>
-#include <omp.h>
-#include <immintrin.h>
 #include <algorithm>
+#include <cpuid.h>
+#include <immintrin.h>
+#include <omp.h>
 #include <span>
 
 #define NUM_LAYERS 35
@@ -37,55 +37,78 @@ import cpu_backend;
 import models;
 
 // Repeatedly applies the highest-priority learned merge until no adjacent token pair matches.
-int apply_bpe_merges(const Tokenizer *tokenizer, int *tokens, int count) {
+int apply_bpe_merges(const Tokenizer* tokenizer, int* tokens, int count) {
     for (;;) {
-        const LookupEntry *best_merge = NULL;
+        const LookupEntry* best_merge = NULL;
         int position = -1;
         for (int i = 0; i + 1 < count; i++) {
-            std::span<const LookupEntry> merges(tokenizer->merges, tokenizer->merges + tokenizer->merge_count);
-            auto it = std::find_if(merges.begin(), merges.end(), [&](const LookupEntry &entry) {
+            std::span<const LookupEntry> merges(tokenizer->merges,
+                                                tokenizer->merges + tokenizer->merge_count);
+            auto it = std::find_if(merges.begin(), merges.end(), [&](const LookupEntry& entry) {
                 int32_t key[2];
                 memcpy(key, entry.key, 8);
                 return key[0] == tokens[i] && key[1] == tokens[i + 1];
             });
-            if (it != merges.end() && (!best_merge || it->rank < best_merge->rank)) { best_merge = &*it; position = i; }
+            if (it != merges.end() && (!best_merge || it->rank < best_merge->rank)) {
+                best_merge = &*it;
+                position = i;
+            }
         }
-        if (!best_merge) return count;
+        if (!best_merge)
+            return count;
 
         tokens[position] = best_merge->result;
-        memmove(tokens + position + 1, tokens + position + 2, (count - position - 2) * sizeof(*tokens));
+        memmove(tokens + position + 1, tokens + position + 2,
+                (count - position - 2) * sizeof(*tokens));
         count--;
     }
 }
 
-// Converts the three prompt segments from UTF-8 into vocabulary pieces, falls back to byte tokens when needed, applies BPE, and prepends <bos>.
-int tokenize(const Tokenizer *tokenizer, const char *segments[3], int *tokens, int capacity) {
+// Converts the three prompt segments from UTF-8 into vocabulary pieces, falls back to byte tokens
+// when needed, applies BPE, and prepends <bos>.
+int tokenize(const Tokenizer* tokenizer, const char* segments[3], int* tokens, int capacity) {
     int count = 1;
     for (int segment = 0; segment < 3; segment++)
-        for (const char *cursor = segments[segment]; *cursor;) {
-            if (count >= capacity) return -1;
+        for (const char* cursor = segments[segment]; *cursor;) {
+            if (count >= capacity)
+                return -1;
             int special = -1;
             if (*cursor == '<')
                 for (int i = 0; i < tokenizer->special_count && special < 0; i++) {
                     int length = (int)strlen(tokenizer->specials[i].token);
-                    if (!strncmp(cursor, tokenizer->specials[i].token, length)) { special = tokenizer->specials[i].id; cursor += length; }
+                    if (!strncmp(cursor, tokenizer->specials[i].token, length)) {
+                        special = tokenizer->specials[i].id;
+                        cursor += length;
+                    }
                 }
-            if (special >= 0) { tokens[count++] = special; continue; }
+            if (special >= 0) {
+                tokens[count++] = special;
+                continue;
+            }
             char piece[8] = {0};
-            if (*cursor == ' ') { memcpy(piece, "\xE2\x96\x81", 3); cursor++; } // SentencePiece represents spaces with U+2581.
+            if (*cursor == ' ') {
+                memcpy(piece, "\xE2\x96\x81", 3);
+                cursor++;
+            } // SentencePiece represents spaces with U+2581.
             else {
                 piece[0] = *cursor++;
                 if ((piece[0] & 0xC0) == 0xC0)
-                    for (int i = 1; i < 4 && (*cursor & 0xC0) == 0x80; i++) piece[i] = *cursor++;
+                    for (int i = 1; i < 4 && (*cursor & 0xC0) == 0x80; i++)
+                        piece[i] = *cursor++;
             }
-            std::span<const LookupEntry> encode_vocab(tokenizer->encode_vocab, tokenizer->encode_vocab_count);
-            auto it = std::find_if(encode_vocab.begin(), encode_vocab.end(), [&](const LookupEntry &entry) {
-                return memcmp(entry.key, piece, 8) == 0;
-            });
-            if (it != encode_vocab.end()) { tokens[count++] = it->result; continue; }
+            std::span<const LookupEntry> encode_vocab(tokenizer->encode_vocab,
+                                                      tokenizer->encode_vocab_count);
+            auto it = std::find_if(
+                encode_vocab.begin(), encode_vocab.end(),
+                [&](const LookupEntry& entry) { return memcmp(entry.key, piece, 8) == 0; });
+            if (it != encode_vocab.end()) {
+                tokens[count++] = it->result;
+                continue;
+            }
 
-            for (const unsigned char *byte = (const unsigned char *)piece; *byte; byte++) {
-                if (count >= capacity) return -1;
+            for (const unsigned char* byte = (const unsigned char*)piece; *byte; byte++) {
+                if (count >= capacity)
+                    return -1;
                 tokens[count++] = 238 + *byte; // Byte tokens occupy IDs 238 through 493.
             }
         }
@@ -94,63 +117,87 @@ int tokenize(const Tokenizer *tokenizer, const char *segments[3], int *tokens, i
     return count;
 }
 
-const char *token_text(const Tokenizer *tokenizer, int token) {
+const char* token_text(const Tokenizer* tokenizer, int token) {
     return token >= 0 && token < VOCAB_SIZE ? tokenizer->decoded_tokens[token] : "";
 }
 
 struct InferenceState {
-    float residual[BATCH_SIZE * HIDDEN_SIZE];                           // Carries each token's hidden state through all 35 layers.
-    float hidden[BATCH_SIZE * 8 * HIDDEN_SIZE];                         // Reused for intermediate results and sized for the largest 12,288-value MLP output.
-    float auxiliary[BATCH_SIZE * 8 * HIDDEN_SIZE];                      // Holds a second intermediate when attention or the MLP needs two results at once.
-    int8_t quantized[BATCH_SIZE * 8 * HIDDEN_SIZE];                     // Holds the current linear input after dynamic int8 quantization.
-    float activation_scales[BATCH_SIZE * 8 * HIDDEN_SIZE / 64];         // Stores one float scale for every 64 quantized values.
-    float per_layer_inputs[BATCH_SIZE * NUM_LAYERS * 256];              // Stores one 256-value conditioning vector for every token and layer.
-    float sliding_cache[3][4][2 * (SLIDING_WINDOW + BATCH_SIZE) * 256]; // Keeps the previous window and current batch for twelve sliding KV caches.
-    float full_cache[3][2 * MAX_CONTEXT * 512];                         // Holds the complete context for three 512-wide full-attention KV caches.
-    int token_ids[MAX_CONTEXT];                                         // Holds the tokenized prompt before prefill.
-public:
-    void forward(Model *model, const int *tokens, size_t token_count, int start_pos);
+    float residual[BATCH_SIZE *
+                   HIDDEN_SIZE]; // Carries each token's hidden state through all 35 layers.
+    float hidden[BATCH_SIZE * 8 * HIDDEN_SIZE]; // Reused for intermediate results and sized for the
+                                                // largest 12,288-value MLP output.
+    float auxiliary[BATCH_SIZE * 8 * HIDDEN_SIZE];  // Holds a second intermediate when attention or
+                                                    // the MLP needs two results at once.
+    int8_t quantized[BATCH_SIZE * 8 * HIDDEN_SIZE]; // Holds the current linear input after dynamic
+                                                    // int8 quantization.
+    float activation_scales[BATCH_SIZE * 8 * HIDDEN_SIZE /
+                            64]; // Stores one float scale for every 64 quantized values.
+    float per_layer_inputs[BATCH_SIZE * NUM_LAYERS * 256]; // Stores one 256-value conditioning
+                                                           // vector for every token and layer.
+    float sliding_cache[3][4][2 * (SLIDING_WINDOW + BATCH_SIZE) *
+                              256]; // Keeps the previous window and current batch for twelve
+                                    // sliding KV caches.
+    float full_cache[3][2 * MAX_CONTEXT * 512]; // Holds the complete context for three 512-wide
+                                                // full-attention KV caches.
+    int token_ids[MAX_CONTEXT];                 // Holds the tokenized prompt before prefill.
+  public:
+    void forward(Model* model, const int* tokens, size_t token_count, int start_pos);
 };
 
 // Verifies that the compiler laid out the memory-mapped model exactly as the exporter expects.
-static_assert(sizeof(int) == 4 && sizeof(float) == 4 && sizeof(void *) == 8 && sizeof(VocabEntry) == 100 && offsetof(VocabEntry, id) == 96 && sizeof(LookupEntry) == 16 && sizeof(Tokenizer) == 33429932 && sizeof(Tensor) == 32 && sizeof(ModelWeights) == 21472 && sizeof(Model) == 33451408 && offsetof(Model, weights) == 33429936 && BATCH_SIZE == SLIDING_WINDOW && !((SLIDING_WINDOW + BATCH_SIZE) & (SLIDING_WINDOW + BATCH_SIZE - 1)) && !(MAX_CONTEXT & (MAX_CONTEXT - 1)), "MOG ABI mismatch");
+static_assert(sizeof(int) == 4 && sizeof(float) == 4 && sizeof(void*) == 8 &&
+                  sizeof(VocabEntry) == 100 && offsetof(VocabEntry, id) == 96 &&
+                  sizeof(LookupEntry) == 16 && sizeof(Tokenizer) == 33429932 &&
+                  sizeof(Tensor) == 32 && sizeof(ModelWeights) == 21472 &&
+                  sizeof(Model) == 33451408 && offsetof(Model, weights) == 33429936 &&
+                  BATCH_SIZE == SLIDING_WINDOW &&
+                  !((SLIDING_WINDOW + BATCH_SIZE) & (SLIDING_WINDOW + BATCH_SIZE - 1)) &&
+                  !(MAX_CONTEXT & (MAX_CONTEXT - 1)),
+              "MOG ABI mismatch");
 
 // ----------------------------------------------------------------------------
 // Kernels
 
-// Uses one OpenMP thread per physical core because each core already uses SIMD, unless OMP_NUM_THREADS overrides it.
+// Uses one OpenMP thread per physical core because each core already uses SIMD, unless
+// OMP_NUM_THREADS overrides it.
 static inline int thread_count(void) {
     unsigned int eax, ebx, ecx, edx;
     __cpuid_count(0xB, 0, eax, ebx, ecx, edx);
     int logical_cpus = omp_get_num_procs();
     int threads_per_core = ebx & 0xffff;
-    return getenv("OMP_NUM_THREADS") ? omp_get_max_threads() : logical_cpus / (threads_per_core ? threads_per_core : 1);
+    return getenv("OMP_NUM_THREADS") ? omp_get_max_threads()
+                                     : logical_cpus / (threads_per_core ? threads_per_core : 1);
 }
 
-// Converts each input row to int8 in groups of 64 values with a float scale recording each group's magnitude.
-void quantize(int8_t *quantized, float *scales, const float *input, size_t rows, size_t width) {
-    #pragma omp for schedule(static)
+// Converts each input row to int8 in groups of 64 values with a float scale recording each group's
+// magnitude.
+void quantize(int8_t* quantized, float* scales, const float* input, size_t rows, size_t width) {
+#pragma omp for schedule(static)
     for (size_t group_index = 0; group_index < rows * (width / 64); group_index++) {
-        const float *group = input + group_index * 64;
+        const float* group = input + group_index * 64;
         float max_abs = 0.0f;
         for (int j = 0; j < 64; j++) {
             float value = fabsf(group[j]);
-            if (value > max_abs) max_abs = value;
+            if (value > max_abs)
+                max_abs = value;
         }
         float scale = max_abs / 127.0f;
         float inverse_scale = scale > 0.0f ? 1.0f / scale : 0.0f;
-        for (int j = 0; j < 64; j++) quantized[group_index * 64 + j] = (int8_t)rintf(group[j] * inverse_scale);
+        for (int j = 0; j < 64; j++)
+            quantized[group_index * 64 + j] = (int8_t)rintf(group[j] * inverse_scale);
         scales[group_index] = scale;
     }
 }
 
-void attention_scores(float *scores, const float *query, const float *key_cache, int first_key, int num_keys, int cache_mask, int head_dim) {
+void attention_scores(float* scores, const float* query, const float* key_cache, int first_key,
+                      int num_keys, int cache_mask, int head_dim) {
     for (int key_index = 0; key_index < num_keys; key_index++) {
-        const float *key = key_cache + ((first_key + key_index) & cache_mask) * head_dim;
+        const float* key = key_cache + ((first_key + key_index) & cache_mask) * head_dim;
         __m256 sum0 = _mm256_setzero_ps(), sum1 = _mm256_setzero_ps();
         for (int j = 0; j < head_dim; j += 16) {
             sum0 = _mm256_fmadd_ps(_mm256_loadu_ps(query + j), _mm256_loadu_ps(key + j), sum0);
-            sum1 = _mm256_fmadd_ps(_mm256_loadu_ps(query + j + 8), _mm256_loadu_ps(key + j + 8), sum1);
+            sum1 =
+                _mm256_fmadd_ps(_mm256_loadu_ps(query + j + 8), _mm256_loadu_ps(key + j + 8), sum1);
         }
         __m256 sum8 = _mm256_add_ps(sum0, sum1);
         __m128 sum4 = _mm_add_ps(_mm256_castps256_ps128(sum8), _mm256_extractf128_ps(sum8, 1));
@@ -159,27 +206,32 @@ void attention_scores(float *scores, const float *query, const float *key_cache,
     }
 }
 
-void weighted_value_sum(float *output, const float *probabilities, const float *value_cache, int first_key, int num_keys, int cache_mask, int head_dim) {
+void weighted_value_sum(float* output, const float* probabilities, const float* value_cache,
+                        int first_key, int num_keys, int cache_mask, int head_dim) {
     for (int j = 0; j < head_dim; j += 64) {
         __m256 sum[8] = {0};
         for (int key_index = 0; key_index < num_keys; key_index++) {
-            const float *value = value_cache + ((first_key + key_index) & cache_mask) * head_dim + j;
+            const float* value =
+                value_cache + ((first_key + key_index) & cache_mask) * head_dim + j;
             __m256 probability = _mm256_set1_ps(probabilities[key_index]);
             for (int u = 0; u < 8; u++)
                 sum[u] = _mm256_fmadd_ps(probability, _mm256_loadu_ps(value + u * 8), sum[u]);
         }
-        for (int u = 0; u < 8; u++) _mm256_storeu_ps(output + j + u * 8, sum[u]);
+        for (int u = 0; u < 8; u++)
+            _mm256_storeu_ps(output + j + u * 8, sum[u]);
     }
 }
 
-// Approximates GELU from the exported lookup table and multiplies it by the up projection to produce the MLP's gated activation.
-void geglu(float *gate, const float *up, int rows, int width, int up_stride, const Tensor *gelu_table) {
-    const float *table = (const float *)gelu_table->data;
+// Approximates GELU from the exported lookup table and multiplies it by the up projection to
+// produce the MLP's gated activation.
+void geglu(float* gate, const float* up, int rows, int width, int up_stride,
+           const Tensor* gelu_table) {
+    const float* table = (const float*)gelu_table->data;
     const int table_size = gelu_table->shape[0];
     const float lower = (float)gelu_table->shape[1];
     const float upper = (float)gelu_table->shape[2];
     const float scale = (float)(table_size - 1) / (upper - lower);
-    #pragma omp for collapse(2) schedule(static)
+#pragma omp for collapse(2) schedule(static)
     for (int row = 0; row < rows; row++) {
         for (int i = 0; i < width; i++) {
             float x = gate[row * width + i];
@@ -199,40 +251,44 @@ void geglu(float *gate, const float *up, int rows, int width, int up_stride, con
 // ----------------------------------------------------------------------------
 // Transformer
 
-// Looks up packed int8 embedding rows and dequantizes them directly without materializing the full embedding table.
-void embedding(float *output, const Tensor *table, const int *tokens, size_t token_count, float multiplier) {
+// Looks up packed int8 embedding rows and dequantizes them directly without materializing the full
+// embedding table.
+void embedding(float* output, const Tensor* table, const int* tokens, size_t token_count,
+               float multiplier) {
     const int block_rows = 16;
     int width = table->shape[1];
     int groups = width / 64;
-    #pragma omp for schedule(static)
+#pragma omp for schedule(static)
     for (size_t token = 0; token < token_count; token++) {
         size_t block = (size_t)(tokens[token] / block_rows);
         int row = tokens[token] % block_rows;
-        float *vector = output + token * width;
-        const int8_t *block_data = (const int8_t *)table->data + block * block_rows * width;
-        const uint16_t *block_scales = table->scales + block * groups * block_rows;
+        float* vector = output + token * width;
+        const int8_t* block_data = (const int8_t*)table->data + block * block_rows * width;
+        const uint16_t* block_scales = table->scales + block * groups * block_rows;
         for (size_t group_index = 0; group_index < (size_t)groups; group_index++) {
-            const int8_t *group = block_data + group_index * block_rows * 64;
+            const int8_t* group = block_data + group_index * block_rows * 64;
             float scale = _cvtsh_ss(block_scales[group_index * block_rows + row]) * multiplier;
             for (int j = 0; j < 64; j++) {
                 int chunk = j / 4;
                 int offset = j % 4;
-                vector[group_index * 64 + j] = (float)group[chunk * block_rows * 4 + row * 4 + offset] * scale;
+                vector[group_index * 64 + j] =
+                    (float)group[chunk * block_rows * 4 + row * 4 + offset] * scale;
             }
         }
     }
 }
 
-// Rotates pairs of query or key channels using each position's sine and cosine values so attention can distinguish token order.
-void apply_rope(const Tensor *cosines, const Tensor *sines, float *vectors,
-                int num_heads, int head_dim, int start_pos, size_t token_count) {
+// Rotates pairs of query or key channels using each position's sine and cosine values so attention
+// can distinguish token order.
+void apply_rope(const Tensor* cosines, const Tensor* sines, float* vectors, int num_heads,
+                int head_dim, int start_pos, size_t token_count) {
     int pairs = cosines->shape[1];
-    #pragma omp for schedule(static)
+#pragma omp for schedule(static)
     for (size_t token = 0; token < token_count; token++) {
-        const float *cosine = (float *)cosines->data + (start_pos + token) * pairs;
-        const float *sine = (float *)sines->data + (start_pos + token) * pairs;
+        const float* cosine = (float*)cosines->data + (start_pos + token) * pairs;
+        const float* sine = (float*)sines->data + (start_pos + token) * pairs;
         for (size_t head = 0; head < (size_t)num_heads; head++) {
-            float *vector = vectors + (token * num_heads + head) * head_dim;
+            float* vector = vectors + (token * num_heads + head) * head_dim;
             for (int j = 0; j < pairs; j++) {
                 float first = vector[j];
                 float second = vector[j + head_dim / 2];
@@ -243,116 +299,152 @@ void apply_rope(const Tensor *cosines, const Tensor *sines, float *vectors,
     }
 }
 
-// Builds queries, updates the KV cache, and computes causal attention over 512 tokens or the full context while shared layers reuse the latest compatible cache.
-void attention(InferenceState *state, const LayerWeights *layers, int layer,
-               int start_pos, size_t token_count, float *scores) {
-    const LayerWeights *weights = &layers[layer];
+// Builds queries, updates the KV cache, and computes causal attention over 512 tokens or the full
+// context while shared layers reuse the latest compatible cache.
+void attention(InferenceState* state, const LayerWeights* layers, int layer, int start_pos,
+               size_t token_count, float* scores) {
+    const LayerWeights* weights = &layers[layer];
     int full_attention = layer % 5 == 4; // Every fifth layer uses full attention.
     int cache_len = full_attention ? MAX_CONTEXT : SLIDING_WINDOW + BATCH_SIZE;
-    int cache_mask = cache_len - 1; // Both cache lengths are powers of two, so masking wraps positions without division.
+    int cache_mask =
+        cache_len -
+        1; // Both cache lengths are powers of two, so masking wraps positions without division.
     int head_dim = weights->q_norm.shape[0];
     int query_width = weights->q_proj.shape[0];
     int cache_owner = layer;
-    while (!layers[cache_owner].k_proj.data || (cache_owner % 5 == 4) != full_attention) cache_owner--; // Shared layers reuse the latest cache of the same attention type.
-    float *key_cache = full_attention ? state->full_cache[cache_owner / 5] : state->sliding_cache[cache_owner / 5][cache_owner % 5];
-    float *value_cache = key_cache + (size_t)cache_len * head_dim;
+    while (!layers[cache_owner].k_proj.data || (cache_owner % 5 == 4) != full_attention)
+        cache_owner--; // Shared layers reuse the latest cache of the same attention type.
+    float* key_cache = full_attention ? state->full_cache[cache_owner / 5]
+                                      : state->sliding_cache[cache_owner / 5][cache_owner % 5];
+    float* value_cache = key_cache + (size_t)cache_len * head_dim;
 
     // Build the queries for every token in the batch.
-    quantize(state->quantized, state->activation_scales, state->hidden, token_count, weights->q_proj.shape[1]);
-    matmul_int8(state->auxiliary, state->quantized, state->activation_scales, &weights->q_proj, token_count);
-    rmsnorm(state->auxiliary, state->auxiliary, &weights->q_norm, head_dim, 1e-6f, token_count * (query_width / head_dim));
-    apply_rope(&weights->rope_cos, &weights->rope_sin, state->auxiliary, query_width / head_dim, head_dim, start_pos, token_count);
+    quantize(state->quantized, state->activation_scales, state->hidden, token_count,
+             weights->q_proj.shape[1]);
+    matmul_int8(state->auxiliary, state->quantized, state->activation_scales, &weights->q_proj,
+                token_count);
+    rmsnorm(state->auxiliary, state->auxiliary, &weights->q_norm, head_dim, 1e-6f,
+            token_count * (query_width / head_dim));
+    apply_rope(&weights->rope_cos, &weights->rope_sin, state->auxiliary, query_width / head_dim,
+               head_dim, start_pos, token_count);
 
     // Compute keys and values and write them to the cache. Only the first 15 layers
     // have these weights, every other layer reads a cache an earlier layer filled.
     if (weights->k_proj.data) {
-        float *new_keys = key_cache + ((size_t)start_pos & cache_mask) * head_dim;
-        float *new_values = value_cache + ((size_t)start_pos & cache_mask) * head_dim;
-        matmul_int8(new_keys, state->quantized, state->activation_scales, &weights->k_proj, token_count);
-        matmul_int8(new_values, state->quantized, state->activation_scales, &weights->v_proj, token_count);
+        float* new_keys = key_cache + ((size_t)start_pos & cache_mask) * head_dim;
+        float* new_values = value_cache + ((size_t)start_pos & cache_mask) * head_dim;
+        matmul_int8(new_keys, state->quantized, state->activation_scales, &weights->k_proj,
+                    token_count);
+        matmul_int8(new_values, state->quantized, state->activation_scales, &weights->v_proj,
+                    token_count);
         rmsnorm(new_keys, new_keys, &weights->k_norm, head_dim, 1e-6f, token_count);
         // Value vectors are normalized without a learned weight.
         rmsnorm(new_values, new_values, NULL, head_dim, 1e-6f, token_count);
-        apply_rope(&weights->rope_cos, &weights->rope_sin, new_keys, 1, head_dim, start_pos, token_count);
+        apply_rope(&weights->rope_cos, &weights->rope_sin, new_keys, 1, head_dim, start_pos,
+                   token_count);
     }
 
-    // Each head scores its query against the visible keys and averages their values.
-    // Sliding-window layers see the last 512 keys, full-attention layers see everything.
-    #pragma omp for collapse(2) schedule(dynamic, 1)
+// Each head scores its query against the visible keys and averages their values.
+// Sliding-window layers see the last 512 keys, full-attention layers see everything.
+#pragma omp for collapse(2) schedule(dynamic, 1)
     for (size_t head = 0; head < (size_t)(query_width / head_dim); head++) {
         for (size_t token = 0; token < token_count; token++) {
-            int first_key = !full_attention && start_pos + (int)token + 1 > SLIDING_WINDOW ? start_pos + (int)token + 1 - SLIDING_WINDOW : 0;
+            int first_key = !full_attention && start_pos + (int)token + 1 > SLIDING_WINDOW
+                                ? start_pos + (int)token + 1 - SLIDING_WINDOW
+                                : 0;
             int num_keys = start_pos + (int)token + 1 - first_key;
-            float *head_output = state->hidden + token * query_width + head * head_dim;
-            const float *query = state->auxiliary + token * query_width + head * head_dim;
+            float* head_output = state->hidden + token * query_width + head * head_dim;
+            const float* query = state->auxiliary + token * query_width + head * head_dim;
             attention_scores(scores, query, key_cache, first_key, num_keys, cache_mask, head_dim);
             softmax(scores, num_keys);
-            weighted_value_sum(head_output, scores, value_cache, first_key, num_keys, cache_mask, head_dim);
+            weighted_value_sum(head_output, scores, value_cache, first_key, num_keys, cache_mask,
+                               head_dim);
         }
     }
 
     // Merge the heads back to the residual width.
-    quantize(state->quantized, state->activation_scales, state->hidden, token_count, weights->o_proj.shape[1]);
-    matmul_int8(state->hidden, state->quantized, state->activation_scales, &weights->o_proj, token_count);
+    quantize(state->quantized, state->activation_scales, state->hidden, token_count,
+             weights->o_proj.shape[1]);
+    matmul_int8(state->hidden, state->quantized, state->activation_scales, &weights->o_proj,
+                token_count);
 }
 
-void InferenceState::forward(Model *model, const int *tokens, size_t token_count, int start_pos) {
+void InferenceState::forward(Model* model, const int* tokens, size_t token_count, int start_pos) {
     int per_layer_width = model->weights.per_layer_projection_norm.shape[0];
-    // One OpenMP team stays alive for the full forward pass while each kernel divides its own loop.
-    #pragma omp parallel num_threads(thread_count())
+// One OpenMP team stays alive for the full forward pass while each kernel divides its own loop.
+#pragma omp parallel num_threads(thread_count())
     {
-    float scores[(size_t)start_pos + token_count]; // Each thread needs private scratch large enough for every visible key.
-    embedding(residual, &model->weights.embed, tokens, token_count, sqrtf((float)HIDDEN_SIZE));
+        float scores[(size_t)start_pos + token_count]; // Each thread needs private scratch large
+                                                       // enough for every visible key.
+        embedding(residual, &model->weights.embed, tokens, token_count, sqrtf((float)HIDDEN_SIZE));
 
-    // Build the token-conditioned input that each transformer layer will receive.
-    quantize(quantized, activation_scales, residual, token_count, HIDDEN_SIZE);
-    matmul_int8(per_layer_inputs, quantized, activation_scales, &model->weights.per_layer_model_projection, token_count);
-    rmsnorm(per_layer_inputs, per_layer_inputs, &model->weights.per_layer_projection_norm, per_layer_width, 1e-6f * HIDDEN_SIZE, token_count * NUM_LAYERS);
-
-    embedding(hidden, &model->weights.embed_per_layer, tokens, token_count, sqrtf((float)per_layer_width));
-    add_and_scale(per_layer_inputs, hidden, token_count * NUM_LAYERS * per_layer_width, 1.0f / sqrtf(2.0f)); 
-
-    for (int layer = 0; layer < NUM_LAYERS; layer++) {
-        LayerWeights *weights = &model->weights.layers[layer];
-
-        // Attention, normalized and added back onto the residual stream.
-        rmsnorm(hidden, residual, &weights->input_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-        attention(this, model->weights.layers, layer, start_pos, token_count, scores);
-        rmsnorm(hidden, hidden, &weights->post_attn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-        add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, 1.0f);
-
-        // Feed-forward network, down(gelu(gate) * up), quantizing activations to int8 before each matmul.
-        rmsnorm(hidden, residual, &weights->pre_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-        quantize(quantized, activation_scales, hidden, token_count, weights->gate_proj.shape[1]);
-        matmul_int8(hidden, quantized, activation_scales, &weights->gate_proj, token_count);
-        matmul_int8(auxiliary, quantized, activation_scales, &weights->up_proj, token_count);
-        geglu(hidden, auxiliary, token_count, weights->gate_proj.shape[0], weights->gate_proj.shape[0], &model->weights.gelu_table);
-        quantize(quantized, activation_scales, hidden, token_count, weights->down_proj.shape[1]);
-        matmul_int8(hidden, quantized, activation_scales, &weights->down_proj, token_count);
-        rmsnorm(hidden, hidden, &weights->post_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-        add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, 1.0f);
-
-        // This layer's per-layer embedding row, gated and added with a learned scale.
+        // Build the token-conditioned input that each transformer layer will receive.
         quantize(quantized, activation_scales, residual, token_count, HIDDEN_SIZE);
-        matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_input_gate, token_count);
-        geglu(hidden, per_layer_inputs + layer * per_layer_width, token_count, per_layer_width, NUM_LAYERS * per_layer_width, &model->weights.gelu_table);
-        quantize(quantized, activation_scales, hidden, token_count, weights->per_layer_projection.shape[1]);
-        matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_projection, token_count);
-        rmsnorm(hidden, hidden, &weights->post_per_layer_input_norm, HIDDEN_SIZE, 1e-6f, token_count);
-        add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, ((float *)weights->layer_scalar.data)[0]);
-    }
+        matmul_int8(per_layer_inputs, quantized, activation_scales,
+                    &model->weights.per_layer_model_projection, token_count);
+        rmsnorm(per_layer_inputs, per_layer_inputs, &model->weights.per_layer_projection_norm,
+                per_layer_width, 1e-6f * HIDDEN_SIZE, token_count * NUM_LAYERS);
+
+        embedding(hidden, &model->weights.embed_per_layer, tokens, token_count,
+                  sqrtf((float)per_layer_width));
+        add_and_scale(per_layer_inputs, hidden, token_count * NUM_LAYERS * per_layer_width,
+                      1.0f / sqrtf(2.0f));
+
+        for (int layer = 0; layer < NUM_LAYERS; layer++) {
+            LayerWeights* weights = &model->weights.layers[layer];
+
+            // Attention, normalized and added back onto the residual stream.
+            rmsnorm(hidden, residual, &weights->input_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
+            attention(this, model->weights.layers, layer, start_pos, token_count, scores);
+            rmsnorm(hidden, hidden, &weights->post_attn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
+            add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, 1.0f);
+
+            // Feed-forward network, down(gelu(gate) * up), quantizing activations to int8 before
+            // each matmul.
+            rmsnorm(hidden, residual, &weights->pre_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
+            quantize(quantized, activation_scales, hidden, token_count,
+                     weights->gate_proj.shape[1]);
+            matmul_int8(hidden, quantized, activation_scales, &weights->gate_proj, token_count);
+            matmul_int8(auxiliary, quantized, activation_scales, &weights->up_proj, token_count);
+            geglu(hidden, auxiliary, token_count, weights->gate_proj.shape[0],
+                  weights->gate_proj.shape[0], &model->weights.gelu_table);
+            quantize(quantized, activation_scales, hidden, token_count,
+                     weights->down_proj.shape[1]);
+            matmul_int8(hidden, quantized, activation_scales, &weights->down_proj, token_count);
+            rmsnorm(hidden, hidden, &weights->post_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
+            add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, 1.0f);
+
+            // This layer's per-layer embedding row, gated and added with a learned scale.
+            quantize(quantized, activation_scales, residual, token_count, HIDDEN_SIZE);
+            matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_input_gate,
+                        token_count);
+            geglu(hidden, per_layer_inputs + layer * per_layer_width, token_count, per_layer_width,
+                  NUM_LAYERS * per_layer_width, &model->weights.gelu_table);
+            quantize(quantized, activation_scales, hidden, token_count,
+                     weights->per_layer_projection.shape[1]);
+            matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_projection,
+                        token_count);
+            rmsnorm(hidden, hidden, &weights->post_per_layer_input_norm, HIDDEN_SIZE, 1e-6f,
+                    token_count);
+            add_and_scale(residual, hidden, token_count * HIDDEN_SIZE,
+                          ((float*)weights->layer_scalar.data)[0]);
+        }
     }
 }
 
-// Reuses the embedding matrix to turn the final token representation into vocabulary logits, then applies Gemma's tanh soft cap.
-float *logits(Model *model, InferenceState *state, size_t token) {
-    #pragma omp parallel num_threads(thread_count())
+// Reuses the embedding matrix to turn the final token representation into vocabulary logits, then
+// applies Gemma's tanh soft cap.
+float* logits(Model* model, InferenceState* state, size_t token) {
+#pragma omp parallel num_threads(thread_count())
     {
-        rmsnorm(state->hidden, state->residual + token * HIDDEN_SIZE, &model->weights.norm, HIDDEN_SIZE, 1e-6f, 1);
+        rmsnorm(state->hidden, state->residual + token * HIDDEN_SIZE, &model->weights.norm,
+                HIDDEN_SIZE, 1e-6f, 1);
         quantize(state->quantized, state->activation_scales, state->hidden, 1, HIDDEN_SIZE);
-        matmul_int8(state->hidden, state->quantized, state->activation_scales, &model->weights.embed, 1);
-        #pragma omp for schedule(static)
-        for (int i = 0; i < VOCAB_SIZE; i++) state->hidden[i] = 30.0f * tanhf(state->hidden[i] / 30.0f);
+        matmul_int8(state->hidden, state->quantized, state->activation_scales,
+                    &model->weights.embed, 1);
+#pragma omp for schedule(static)
+        for (int i = 0; i < VOCAB_SIZE; i++)
+            state->hidden[i] = 30.0f * tanhf(state->hidden[i] / 30.0f);
     }
     return state->hidden;
 }
@@ -369,34 +461,50 @@ float random_uniform(void) {
     return (float)((rng_state * 0x2545F4914F6CDD1DULL) >> 40) / 16777216.0f;
 }
 
-int sample(float *logits, int vocab_size, float temperature) {
+int sample(float* logits, int vocab_size, float temperature) {
     if (temperature <= 0.0f) {
         int best = 0;
         for (int i = 1; i < vocab_size; i++)
-            if (logits[i] > logits[best]) best = i;
+            if (logits[i] > logits[best])
+                best = i;
         return best;
     }
 
-    struct { float score; int token; } top[64]; // Sampling considers only the 64 highest logits.
-    for (int i = 0; i < 64; i++) top[i].score = -INFINITY;
+    struct {
+        float score;
+        int token;
+    } top[64]; // Sampling considers only the 64 highest logits.
+    for (int i = 0; i < 64; i++)
+        top[i].score = -INFINITY;
     for (int token = 0; token < vocab_size; token++) {
-        if (logits[token] <= top[63].score) continue;
+        if (logits[token] <= top[63].score)
+            continue;
         int i = 63;
-        while (i > 0 && logits[token] > top[i - 1].score) { top[i] = top[i - 1]; i--; }
-        top[i].score = logits[token]; top[i].token = token;
+        while (i > 0 && logits[token] > top[i - 1].score) {
+            top[i] = top[i - 1];
+            i--;
+        }
+        top[i].score = logits[token];
+        top[i].token = token;
     }
     float sum = 0.0f, max = top[0].score / temperature;
-    for (int i = 0; i < 64; i++) sum += top[i].score = expf(top[i].score / temperature - max);
+    for (int i = 0; i < 64; i++)
+        sum += top[i].score = expf(top[i].score / temperature - max);
     float mass = 0.0f;
     int count = 0;
-    while (mass < 0.95f * sum) mass += top[count++].score; // Keep the smallest prefix containing 95% of the top-64 probability mass.
+    while (mass < 0.95f * sum)
+        mass +=
+            top[count++]
+                .score; // Keep the smallest prefix containing 95% of the top-64 probability mass.
     float threshold = random_uniform() * mass;
     for (int i = 0; i < count; i++)
-        if ((threshold -= top[i].score) <= 0.0f) return top[i].token;
+        if ((threshold -= top[i].score) <= 0.0f)
+            return top[i].token;
     return top[count - 1].token;
 }
 
-void prefill(Model *model, InferenceState *state, const int *tokens, int token_count, int dump_logits) {
+void prefill(Model* model, InferenceState* state, const int* tokens, int token_count,
+             int dump_logits) {
     for (int position = 0; position < token_count; position += BATCH_SIZE) {
         int chunk = token_count - position < BATCH_SIZE ? token_count - position : BATCH_SIZE;
         state->forward(model, tokens + position, chunk, position);
@@ -408,15 +516,17 @@ void prefill(Model *model, InferenceState *state, const int *tokens, int token_c
     }
 }
 
-void generate(Model *model, InferenceState *state, const char *prompt, int max_new_tokens, float temperature, int dump_logits) {
-    Tokenizer *tokenizer = &model->tokenizer;
+void generate(Model* model, InferenceState* state, const char* prompt, int max_new_tokens,
+              float temperature, int dump_logits) {
+    Tokenizer* tokenizer = &model->tokenizer;
     int styled = !dump_logits && isatty(STDOUT_FILENO);
 
     if (max_new_tokens < 0) {
         fprintf(stderr, "-n must be non-negative\n");
         exit(1);
     }
-    const char *segments[3] = {dump_logits ? "" : "<|turn>user\n", prompt,dump_logits ? "" : "<turn|>\n<|turn>model\n"};
+    const char* segments[3] = {dump_logits ? "" : "<|turn>user\n", prompt,
+                               dump_logits ? "" : "<turn|>\n<|turn>model\n"};
     int prompt_tokens = tokenize(tokenizer, segments, state->token_ids, MAX_CONTEXT);
     if (prompt_tokens < 0) {
         fprintf(stderr, "prompt exceeds the %d-token context limit\n", MAX_CONTEXT);
@@ -428,13 +538,18 @@ void generate(Model *model, InferenceState *state, const char *prompt, int max_n
     }
 
     prefill(model, state, state->token_ids, prompt_tokens, dump_logits);
-    if (dump_logits) return;
+    if (dump_logits)
+        return;
 
     int end = prompt_tokens + max_new_tokens;
-    if (end > MAX_CONTEXT || end < prompt_tokens) end = MAX_CONTEXT;
+    if (end > MAX_CONTEXT || end < prompt_tokens)
+        end = MAX_CONTEXT;
     for (int position = prompt_tokens; position < end; position++) {
-        int next_token = sample(logits(model, state, position == prompt_tokens ? (prompt_tokens - 1) % BATCH_SIZE : 0), VOCAB_SIZE, temperature);
-        if (next_token == 1 || next_token == 106) break; // Stop at <eos> or <turn|>.
+        int next_token = sample(
+            logits(model, state, position == prompt_tokens ? (prompt_tokens - 1) % BATCH_SIZE : 0),
+            VOCAB_SIZE, temperature);
+        if (next_token == 1 || next_token == 106)
+            break; // Stop at <eos> or <turn|>.
 
         fputs(token_text(tokenizer, next_token), stdout);
         fflush(stdout);
@@ -460,70 +575,94 @@ double time_seconds(void) {
 #endif
 }
 
-void benchmark(Model *model, InferenceState *state, int prefill_tokens, int generated_tokens) {
+void benchmark(Model* model, InferenceState* state, int prefill_tokens, int generated_tokens) {
     if (prefill_tokens > 0) {
         for (int i = 0; i < prefill_tokens; i++)
             state->token_ids[i] = 2 + i % 1000;
         double start = time_seconds();
         prefill(model, state, state->token_ids, prefill_tokens, 0);
         (void)logits(model, state, (prefill_tokens - 1) % BATCH_SIZE);
-        printf("pp%d %.2f tok/s\n", prefill_tokens, (double)prefill_tokens / (time_seconds() - start));
+        printf("pp%d %.2f tok/s\n", prefill_tokens,
+               (double)prefill_tokens / (time_seconds() - start));
     }
     if (generated_tokens > 0) {
         const int token = 2;
         double start = time_seconds();
-        for (int position = prefill_tokens; position < prefill_tokens + generated_tokens; position++) {
+        for (int position = prefill_tokens; position < prefill_tokens + generated_tokens;
+             position++) {
             state->forward(model, &token, 1, position);
             (void)logits(model, state, 0);
         }
-        printf("tg%d@d%d %.2f tok/s\n", generated_tokens, prefill_tokens, (double)generated_tokens / (time_seconds() - start));
+        printf("tg%d@d%d %.2f tok/s\n", generated_tokens, prefill_tokens,
+               (double)generated_tokens / (time_seconds() - start));
     }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
 #ifdef _WIN32
     argv_utf8(&argc, &argv);
 #endif
-    const char *model_path = "gemma4-E2B-int8.bin";
-    const char *prompt = "Why is the sky blue?";
+    const char* model_path = "gemma4-E2B-int8.bin";
+    const char* prompt = "Why is the sky blue?";
     float temperature = 1.0f;
     int max_new_tokens = 1024;
     int benchmark_mode = 0, dump_logits = 0, prefill_tokens = 0, generated_tokens = 256;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-m") && i + 1 < argc) model_path = argv[++i];
-        else if (!strcmp(argv[i], "-t") && i + 1 < argc) temperature = atof(argv[++i]);
-        else if (!strcmp(argv[i], "-n") && i + 1 < argc) max_new_tokens = atoi(argv[++i]);
+        if (!strcmp(argv[i], "-m") && i + 1 < argc)
+            model_path = argv[++i];
+        else if (!strcmp(argv[i], "-t") && i + 1 < argc)
+            temperature = atof(argv[++i]);
+        else if (!strcmp(argv[i], "-n") && i + 1 < argc)
+            max_new_tokens = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bench")) {
             benchmark_mode = 1;
-            if (i + 1 < argc) prefill_tokens = atoi(argv[++i]);
-            if (i + 1 < argc) generated_tokens = atoi(argv[++i]);
-        }
-        else if (!strcmp(argv[i], "--dump-logits")) dump_logits = 1;
-        else prompt = argv[i];
+            if (i + 1 < argc)
+                prefill_tokens = atoi(argv[++i]);
+            if (i + 1 < argc)
+                generated_tokens = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--dump-logits"))
+            dump_logits = 1;
+        else
+            prompt = argv[i];
     }
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
-    if (dump_logits) _setmode(_fileno(stdout), _O_BINARY);
+    if (dump_logits)
+        _setmode(_fileno(stdout), _O_BINARY);
 #endif
     int fd = open(model_path, O_RDONLY);
     struct stat st;
-    if (fd < 0 || fstat(fd, &st)) { perror(model_path); return 1; }
-    Model *model = (Model *)mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (model == MAP_FAILED) { perror("mmap"); return 1; }
-
-    if (memcmp(model->magic, "MOG", 4) != 0) { fprintf(stderr, "bad model file\n"); return 1; }
-    Tensor *tensors = (Tensor *)&model->weights;
-    for (size_t i = 0; i < sizeof(model->weights) / sizeof(*tensors); i++) {
-        tensors[i].data = tensors[i].data ? (void *)((uint8_t *)model + (uintptr_t)tensors[i].data) : NULL;
-        tensors[i].scales = tensors[i].scales ? (uint16_t *)((uint8_t *)model + (uintptr_t)tensors[i].scales) : NULL;
+    if (fd < 0 || fstat(fd, &st)) {
+        perror(model_path);
+        return 1;
     }
-    InferenceState *state = (InferenceState*)calloc(1, sizeof(*state));
+    Model* model =
+        (Model*)mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (model == MAP_FAILED) {
+        perror("mmap");
+        return 1;
+    }
+
+    if (memcmp(model->magic, "MOG", 4) != 0) {
+        fprintf(stderr, "bad model file\n");
+        return 1;
+    }
+    Tensor* tensors = (Tensor*)&model->weights;
+    for (size_t i = 0; i < sizeof(model->weights) / sizeof(*tensors); i++) {
+        tensors[i].data =
+            tensors[i].data ? (void*)((uint8_t*)model + (uintptr_t)tensors[i].data) : NULL;
+        tensors[i].scales =
+            tensors[i].scales ? (uint16_t*)((uint8_t*)model + (uintptr_t)tensors[i].scales) : NULL;
+    }
+    InferenceState* state = (InferenceState*)calloc(1, sizeof(*state));
 
     rng_state = (unsigned long long)(time_seconds() * 1e9);
-    if (benchmark_mode) benchmark(model, state, prefill_tokens, generated_tokens);
-    else generate(model, state, prompt, max_new_tokens, temperature, dump_logits);
+    if (benchmark_mode)
+        benchmark(model, state, prefill_tokens, generated_tokens);
+    else
+        generate(model, state, prompt, max_new_tokens, temperature, dump_logits);
     free(state);
     munmap(model, (size_t)st.st_size);
     return 0;

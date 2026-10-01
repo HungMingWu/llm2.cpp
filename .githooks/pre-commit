@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v clang-format >/dev/null 2>&1; then
+  echo "pre-commit: clang-format is required; install it or unset core.hooksPath to skip this hook." >&2
+  exit 1
+fi
+
+status=0
+while IFS= read -r -d '' path; do
+  staged_file=$(mktemp)
+  formatted_file=$(mktemp)
+  trap 'rm -f "$staged_file" "$formatted_file"' EXIT
+
+  git show ":$path" >"$staged_file"
+  clang-format --assume-filename="$path" "$staged_file" >"$formatted_file"
+
+  if ! cmp -s "$staged_file" "$formatted_file"; then
+    printf 'pre-commit: %s needs clang-format. Run the CMake format target and stage the result.\n' "$path" >&2
+    status=1
+  fi
+
+  rm -f "$staged_file" "$formatted_file"
+  trap - EXIT
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.cpp' '*.cc' '*.cxx' '*.h' '*.hpp' '*.cppm' '*.ixx')
+
+exit "$status"
