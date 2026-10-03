@@ -1,7 +1,3 @@
-#ifndef _WIN32
-#define _POSIX_C_SOURCE 200809L
-#endif
-
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -9,17 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include "win.h"
-#else
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#endif
 
 #include <algorithm>
+#include <cassert>
 #include <cpuid.h>
 #include <immintrin.h>
 #include <omp.h>
@@ -34,6 +24,7 @@
 
 import base;
 import cpu_backend;
+import io;
 import models;
 
 // Repeatedly applies the highest-priority learned merge until no adjacent token pair matches.
@@ -631,20 +622,12 @@ int main(int argc, char** argv) {
     if (dump_logits)
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
-    int fd = open(model_path, O_RDONLY);
-    struct stat st;
-    if (fd < 0 || fstat(fd, &st)) {
-        perror(model_path);
-        return 1;
-    }
-    Model* model =
-        (Model*)mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (model == MAP_FAILED) {
-        perror("mmap");
-        return 1;
-    }
-
+    auto mmio_file_region = io::mapped_file::open(model_path, io::file_access::read)
+                                .and_then([](io::mapped_file&& file) {
+                                    return file.map({.access = io::map_access::copy_on_write});
+                                });
+    assert(mmio_file_region.has_value());
+    Model* model = (Model*)mmio_file_region.value().data();
     if (memcmp(model->magic, "MOG", 4) != 0) {
         fprintf(stderr, "bad model file\n");
         return 1;
@@ -664,7 +647,6 @@ int main(int argc, char** argv) {
     else
         generate(model, state, prompt, max_new_tokens, temperature, dump_logits);
     free(state);
-    munmap(model, (size_t)st.st_size);
     return 0;
 }
 //      |\__/,|   (`\_

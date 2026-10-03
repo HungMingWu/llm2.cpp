@@ -1,24 +1,24 @@
 cmake_minimum_required(VERSION 3.28)
 project(llm.cpp LANGUAGES CXX)
 
-set(LLM2_FORMAT_SOURCES
-  demo.cpp
-  base/base.cppm
-  cpu_backend/cpu_backend.cpp
-  cpu_backend/cpu_backend.cppm
-  models/models.cppm
+file(GLOB_RECURSE LLM_FORMAT_SOURCES CONFIGURE_DEPENDS
+  LIST_DIRECTORIES false
+  "${CMAKE_SOURCE_DIR}/*.h"
+  "${CMAKE_SOURCE_DIR}/*.cpp"
+  "${CMAKE_SOURCE_DIR}/*.cppm"
 )
+list(FILTER LLM_FORMAT_SOURCES EXCLUDE REGEX "^${CMAKE_BINARY_DIR}/")
 
 find_program(CLANG_FORMAT_EXECUTABLE NAMES clang-format)
 if(CLANG_FORMAT_EXECUTABLE)
   add_custom_target(format
-    COMMAND ${CLANG_FORMAT_EXECUTABLE} -i ${LLM2_FORMAT_SOURCES}
+    COMMAND ${CLANG_FORMAT_EXECUTABLE} -i ${LLM_FORMAT_SOURCES}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Formatting C++ sources with clang-format"
     VERBATIM
   )
   add_custom_target(format-check
-    COMMAND ${CLANG_FORMAT_EXECUTABLE} --dry-run --Werror ${LLM2_FORMAT_SOURCES}
+    COMMAND ${CLANG_FORMAT_EXECUTABLE} --dry-run --Werror ${LLM_FORMAT_SOURCES}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Checking C++ formatting with clang-format"
     VERBATIM
@@ -55,6 +55,7 @@ target_compile_options(demo PRIVATE
 )
 
 target_link_libraries(demo PRIVATE
+  libbase
   libcpu_backend
   libmodels
 )
