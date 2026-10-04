@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cpuid.h>
 #include <immintrin.h>
+#include <list>
 #include <omp.h>
 #include <span>
 #include <string>
@@ -62,30 +63,40 @@ struct Options {
 // clang-format on
 
 // Repeatedly applies the highest-priority learned merge until no adjacent token pair matches.
-int apply_bpe_merges(const Tokenizer* tokenizer, int* tokens, int count) {
+int apply_bpe_merges(const Tokenizer* tokenizer, std::span<int> tokens) {
+    std::list<int> token_nodes(tokens.begin(), tokens.end());
+    std::span<const LookupEntry> merge_rules(tokenizer->merges,
+                                             tokenizer->merges + tokenizer->merge_count);
     for (;;) {
-        const LookupEntry* best_merge = NULL;
-        int position = -1;
-        for (int i = 0; i + 1 < count; i++) {
-            std::span<const LookupEntry> merges(tokenizer->merges,
-                                                tokenizer->merges + tokenizer->merge_count);
-            auto it = std::find_if(merges.begin(), merges.end(), [&](const LookupEntry& entry) {
-                int32_t key[2];
-                memcpy(key, entry.key, 8);
-                return key[0] == tokens[i] && key[1] == tokens[i + 1];
-            });
-            if (it != merges.end() && (!best_merge || it->rank < best_merge->rank)) {
-                best_merge = &*it;
-                position = i;
+        auto left_token_node = token_nodes.begin();
+        auto right_token_node = std::next(left_token_node);
+        auto best_left_token_node = token_nodes.end();
+        auto best_right_token_node = token_nodes.end();
+        auto best_merge_rule = merge_rules.end();
+        for (; right_token_node != token_nodes.end();
+             ++left_token_node, ++right_token_node) {
+            auto merge_rule_it = std::find_if(
+                merge_rules.begin(), merge_rules.end(), [&](const LookupEntry& merge_rule) {
+                    int32_t token_pair[2];
+                    memcpy(token_pair, merge_rule.key, sizeof(token_pair));
+                    return token_pair[0] == *left_token_node &&
+                           token_pair[1] == *right_token_node;
+                });
+            if (merge_rule_it != merge_rules.end() &&
+                (best_merge_rule == merge_rules.end() ||
+                 merge_rule_it->rank < best_merge_rule->rank)) {
+                best_merge_rule = merge_rule_it;
+                best_left_token_node = left_token_node;
+                best_right_token_node = right_token_node;
             }
         }
-        if (!best_merge)
-            return count;
+        if (best_merge_rule == merge_rules.end()) {
+            std::copy_n(token_nodes.begin(), token_nodes.size(), tokens.begin());
+            return token_nodes.size();
+        }
 
-        tokens[position] = best_merge->result;
-        memmove(tokens + position + 1, tokens + position + 2,
-                (count - position - 2) * sizeof(*tokens));
-        count--;
+        *best_left_token_node = best_merge_rule->result;
+        token_nodes.erase(best_right_token_node);
     }
 }
 
@@ -142,7 +153,7 @@ int tokenize(const Tokenizer* tokenizer, std::array<std::string_view, 3> segment
                 tokens[count++] = 238 + *byte; // Byte tokens occupy IDs 238 through 493.
             }
         }
-    count = 1 + apply_bpe_merges(tokenizer, tokens + 1, count - 1);
+    count = 1 + apply_bpe_merges(tokenizer, std::span(tokens + 1, count - 1));
     tokens[0] = 2; // Token 2 is <bos>.
     return count;
 }
