@@ -40,6 +40,11 @@ add_subdirectory(cpu_backend)
 add_executable(demo)
 target_sources(demo
 PRIVATE
+  FILE_SET hidden_modules
+  TYPE CXX_MODULES
+  FILES
+    cli.cppm
+PRIVATE
   demo.cpp
 )
 
@@ -49,9 +54,14 @@ set_target_properties(demo PROPERTIES
 )
 
 target_compile_options(demo PRIVATE
-  -Wall -Wextra
+  -Wall -Wextra -freflection
   $<$<CONFIG:Release>:-O3>
   -march=native
+)
+
+target_link_options(demo PRIVATE
+  -static-libstdc++
+  -static-libgcc
 )
 
 target_link_libraries(demo PRIVATE

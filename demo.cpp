@@ -14,6 +14,8 @@
 #include <immintrin.h>
 #include <omp.h>
 #include <span>
+#include <string>
+#include <vector>
 
 #define NUM_LAYERS 35
 #define HIDDEN_SIZE 1536
@@ -23,9 +25,41 @@
 #define BATCH_SIZE 512
 
 import base;
+import cli;
 import cpu_backend;
 import io;
 import models;
+
+struct Benchmark {
+    int prefill_tokens = 0;
+    int generated_tokens = 256;
+};
+
+// clang-format off
+struct Options {
+    [[= cli::long_name("model")]]
+    [[= cli::short_name('m')]]
+    std::string model_path = "gemma4-E2B-int8.bin";
+
+    [[= cli::long_name("prompt")]]
+    [[= cli::short_name('p')]]
+    std::string prompt = "Why is the sky blue?";
+
+    [[= cli::long_name("temperature")]]
+    [[= cli::short_name('t')]]
+    float temperature = 1.0;
+
+    [[= cli::long_name("tokens")]]
+    [[= cli::short_name('n')]]
+    int max_new_tokens = 1024;
+
+    [[= cli::long_name("bench")]]
+    std::optional<Benchmark> benchmark;
+
+    [[= cli::long_name("dump-logits")]]
+    bool dump_logits = false;
+};
+// clang-format on
 
 // Repeatedly applies the highest-priority learned merge until no adjacent token pair matches.
 int apply_bpe_merges(const Tokenizer* tokenizer, int* tokens, int count) {
@@ -593,36 +627,18 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     argv_utf8(&argc, &argv);
 #endif
-    const char* model_path = "gemma4-E2B-int8.bin";
+    auto options = cli::parse<Options>(std::span(argv, static_cast<std::size_t>(argc)).subspan(1));
     const char* prompt = "Why is the sky blue?";
-    float temperature = 1.0f;
-    int max_new_tokens = 1024;
-    int benchmark_mode = 0, dump_logits = 0, prefill_tokens = 0, generated_tokens = 256;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-m") && i + 1 < argc)
-            model_path = argv[++i];
-        else if (!strcmp(argv[i], "-t") && i + 1 < argc)
-            temperature = atof(argv[++i]);
-        else if (!strcmp(argv[i], "-n") && i + 1 < argc)
-            max_new_tokens = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--bench")) {
-            benchmark_mode = 1;
-            if (i + 1 < argc)
-                prefill_tokens = atoi(argv[++i]);
-            if (i + 1 < argc)
-                generated_tokens = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--dump-logits"))
-            dump_logits = 1;
-        else
-            prompt = argv[i];
+        prompt = argv[i];
     }
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
-    if (dump_logits)
+    if (options.dump_logits)
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
-    auto mmio_file_region = io::mapped_file::open(model_path, io::file_access::read)
+    auto mmio_file_region = io::mapped_file::open(options.model_path, io::file_access::read)
                                 .and_then([](io::mapped_file&& file) {
                                     return file.map({.access = io::map_access::copy_on_write});
                                 });
@@ -642,10 +658,12 @@ int main(int argc, char** argv) {
     InferenceState* state = (InferenceState*)calloc(1, sizeof(*state));
 
     rng_state = (unsigned long long)(time_seconds() * 1e9);
-    if (benchmark_mode)
-        benchmark(model, state, prefill_tokens, generated_tokens);
+    if (options.benchmark)
+        benchmark(model, state, options.benchmark->prefill_tokens,
+                  options.benchmark->generated_tokens);
     else
-        generate(model, state, prompt, max_new_tokens, temperature, dump_logits);
+        generate(model, state, prompt, options.max_new_tokens, options.temperature,
+                 options.dump_logits);
     free(state);
     return 0;
 }
