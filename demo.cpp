@@ -91,19 +91,21 @@ int apply_bpe_merges(const Tokenizer* tokenizer, int* tokens, int count) {
 
 // Converts the three prompt segments from UTF-8 into vocabulary pieces, falls back to byte tokens
 // when needed, applies BPE, and prepends <bos>.
-int tokenize(const Tokenizer* tokenizer, const char* segments[3], int* tokens, int capacity) {
+int tokenize(const Tokenizer* tokenizer, std::array<std::string_view, 3> segments, int* tokens,
+             int capacity) {
     int count = 1;
-    for (int segment = 0; segment < 3; segment++)
-        for (const char* cursor = segments[segment]; *cursor;) {
+    for (auto segment : segments)
+        while (!segment.empty()) {
             if (count >= capacity)
                 return -1;
             int special = -1;
-            if (*cursor == '<')
+            if (segment[0] == '<')
                 for (int i = 0; i < tokenizer->special_count && special < 0; i++) {
                     int length = (int)strlen(tokenizer->specials[i].token);
-                    if (!strncmp(cursor, tokenizer->specials[i].token, length)) {
+                    if (segment.starts_with(
+                            std::string_view(tokenizer->specials[i].token, length))) {
                         special = tokenizer->specials[i].id;
-                        cursor += length;
+                        segment.remove_prefix(length);
                     }
                 }
             if (special >= 0) {
@@ -111,15 +113,18 @@ int tokenize(const Tokenizer* tokenizer, const char* segments[3], int* tokens, i
                 continue;
             }
             char piece[8] = {0};
-            if (*cursor == ' ') {
+            if (segment[0] == ' ') {
                 memcpy(piece, "\xE2\x96\x81", 3);
-                cursor++;
+                segment.remove_prefix(1);
             } // SentencePiece represents spaces with U+2581.
             else {
-                piece[0] = *cursor++;
+                piece[0] = segment[0];
+                segment.remove_prefix(1);
                 if ((piece[0] & 0xC0) == 0xC0)
-                    for (int i = 1; i < 4 && (*cursor & 0xC0) == 0x80; i++)
-                        piece[i] = *cursor++;
+                    for (int i = 1; i < 4 && !segment.empty() && (segment[0] & 0xC0) == 0x80; i++) {
+                        piece[i] = segment[0];
+                        segment.remove_prefix(1);
+                    }
             }
             std::span<const LookupEntry> encode_vocab(tokenizer->encode_vocab,
                                                       tokenizer->encode_vocab_count);
@@ -550,8 +555,8 @@ void generate(Model* model, InferenceState* state, const char* prompt, int max_n
         fprintf(stderr, "-n must be non-negative\n");
         exit(1);
     }
-    const char* segments[3] = {dump_logits ? "" : "<|turn>user\n", prompt,
-                               dump_logits ? "" : "<turn|>\n<|turn>model\n"};
+    std::array<std::string_view, 3> segments = {dump_logits ? "" : "<|turn>user\n", prompt,
+                                                dump_logits ? "" : "<turn|>\n<|turn>model\n"};
     int prompt_tokens = tokenize(tokenizer, segments, state->token_ids, MAX_CONTEXT);
     if (prompt_tokens < 0) {
         fprintf(stderr, "prompt exceeds the %d-token context limit\n", MAX_CONTEXT);
