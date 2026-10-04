@@ -171,7 +171,7 @@ struct InferenceState {
                                                 // full-attention KV caches.
     int token_ids[MAX_CONTEXT];                 // Holds the tokenized prompt before prefill.
   public:
-    void forward(Model* model, const int* tokens, size_t token_count, int start_pos);
+    void forward(Model* model, std::span<const int> tokens, int start_pos);
 };
 
 // Verifies that the compiler laid out the memory-mapped model exactly as the exporter expects.
@@ -399,64 +399,68 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
                 token_count);
 }
 
-void InferenceState::forward(Model* model, const int* tokens, size_t token_count, int start_pos) {
+void InferenceState::forward(Model* model, std::span<const int> tokens, int start_pos) {
     int per_layer_width = model->weights.per_layer_projection_norm.shape[0];
 // One OpenMP team stays alive for the full forward pass while each kernel divides its own loop.
 #pragma omp parallel num_threads(thread_count())
     {
-        float scores[(size_t)start_pos + token_count]; // Each thread needs private scratch large
-                                                       // enough for every visible key.
-        embedding(residual, &model->weights.embed, tokens, token_count, sqrtf((float)HIDDEN_SIZE));
+        float scores[(size_t)start_pos + tokens.size()]; // Each thread needs private scratch large
+                                                         // enough for every visible key.
+        embedding(residual, &model->weights.embed, tokens.data(), tokens.size(),
+                  sqrtf((float)HIDDEN_SIZE));
 
         // Build the token-conditioned input that each transformer layer will receive.
-        quantize(quantized, activation_scales, residual, token_count, HIDDEN_SIZE);
+        quantize(quantized, activation_scales, residual, tokens.size(), HIDDEN_SIZE);
         matmul_int8(per_layer_inputs, quantized, activation_scales,
-                    &model->weights.per_layer_model_projection, token_count);
+                    &model->weights.per_layer_model_projection, tokens.size());
         rmsnorm(per_layer_inputs, per_layer_inputs, &model->weights.per_layer_projection_norm,
-                per_layer_width, 1e-6f * HIDDEN_SIZE, token_count * NUM_LAYERS);
+                per_layer_width, 1e-6f * HIDDEN_SIZE, tokens.size() * NUM_LAYERS);
 
-        embedding(hidden, &model->weights.embed_per_layer, tokens, token_count,
+        embedding(hidden, &model->weights.embed_per_layer, tokens.data(), tokens.size(),
                   sqrtf((float)per_layer_width));
-        add_and_scale(per_layer_inputs, hidden, token_count * NUM_LAYERS * per_layer_width,
+        add_and_scale(per_layer_inputs, hidden, tokens.size() * NUM_LAYERS * per_layer_width,
                       1.0f / sqrtf(2.0f));
 
         for (int layer = 0; layer < NUM_LAYERS; layer++) {
             LayerWeights* weights = &model->weights.layers[layer];
 
             // Attention, normalized and added back onto the residual stream.
-            rmsnorm(hidden, residual, &weights->input_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-            attention(this, model->weights.layers, layer, start_pos, token_count, scores);
-            rmsnorm(hidden, hidden, &weights->post_attn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-            add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, 1.0f);
+            rmsnorm(hidden, residual, &weights->input_layernorm, HIDDEN_SIZE, 1e-6f, tokens.size());
+            attention(this, model->weights.layers, layer, start_pos, tokens.size(), scores);
+            rmsnorm(hidden, hidden, &weights->post_attn_layernorm, HIDDEN_SIZE, 1e-6f,
+                    tokens.size());
+            add_and_scale(residual, hidden, tokens.size() * HIDDEN_SIZE, 1.0f);
 
             // Feed-forward network, down(gelu(gate) * up), quantizing activations to int8 before
             // each matmul.
-            rmsnorm(hidden, residual, &weights->pre_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-            quantize(quantized, activation_scales, hidden, token_count,
+            rmsnorm(hidden, residual, &weights->pre_ffn_layernorm, HIDDEN_SIZE, 1e-6f,
+                    tokens.size());
+            quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->gate_proj.shape[1]);
-            matmul_int8(hidden, quantized, activation_scales, &weights->gate_proj, token_count);
-            matmul_int8(auxiliary, quantized, activation_scales, &weights->up_proj, token_count);
-            geglu(hidden, auxiliary, token_count, weights->gate_proj.shape[0],
+            matmul_int8(hidden, quantized, activation_scales, &weights->gate_proj, tokens.size());
+            matmul_int8(auxiliary, quantized, activation_scales, &weights->up_proj, tokens.size());
+            geglu(hidden, auxiliary, tokens.size(), weights->gate_proj.shape[0],
                   weights->gate_proj.shape[0], &model->weights.gelu_table);
-            quantize(quantized, activation_scales, hidden, token_count,
+            quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->down_proj.shape[1]);
-            matmul_int8(hidden, quantized, activation_scales, &weights->down_proj, token_count);
-            rmsnorm(hidden, hidden, &weights->post_ffn_layernorm, HIDDEN_SIZE, 1e-6f, token_count);
-            add_and_scale(residual, hidden, token_count * HIDDEN_SIZE, 1.0f);
+            matmul_int8(hidden, quantized, activation_scales, &weights->down_proj, tokens.size());
+            rmsnorm(hidden, hidden, &weights->post_ffn_layernorm, HIDDEN_SIZE, 1e-6f,
+                    tokens.size());
+            add_and_scale(residual, hidden, tokens.size() * HIDDEN_SIZE, 1.0f);
 
             // This layer's per-layer embedding row, gated and added with a learned scale.
-            quantize(quantized, activation_scales, residual, token_count, HIDDEN_SIZE);
+            quantize(quantized, activation_scales, residual, tokens.size(), HIDDEN_SIZE);
             matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_input_gate,
-                        token_count);
-            geglu(hidden, per_layer_inputs + layer * per_layer_width, token_count, per_layer_width,
-                  NUM_LAYERS * per_layer_width, &model->weights.gelu_table);
-            quantize(quantized, activation_scales, hidden, token_count,
+                        tokens.size());
+            geglu(hidden, per_layer_inputs + layer * per_layer_width, tokens.size(),
+                  per_layer_width, NUM_LAYERS * per_layer_width, &model->weights.gelu_table);
+            quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->per_layer_projection.shape[1]);
             matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_projection,
-                        token_count);
+                        tokens.size());
             rmsnorm(hidden, hidden, &weights->post_per_layer_input_norm, HIDDEN_SIZE, 1e-6f,
-                    token_count);
-            add_and_scale(residual, hidden, token_count * HIDDEN_SIZE,
+                    tokens.size());
+            add_and_scale(residual, hidden, tokens.size() * HIDDEN_SIZE,
                           ((float*)weights->layer_scalar.data)[0]);
         }
     }
@@ -533,16 +537,18 @@ int sample(float* logits, int vocab_size, float temperature) {
     return top[count - 1].token;
 }
 
-void prefill(Model* model, InferenceState* state, const int* tokens, int token_count,
-             int dump_logits) {
-    for (int position = 0; position < token_count; position += BATCH_SIZE) {
-        int chunk = token_count - position < BATCH_SIZE ? token_count - position : BATCH_SIZE;
-        state->forward(model, tokens + position, chunk, position);
+void prefill(Model* model, InferenceState* state, std::span<const int> tokens, int dump_logits) {
+    int position = 0;
+    while (!tokens.empty()) {
+        size_t chunk = std::min(tokens.size(), static_cast<size_t>(BATCH_SIZE));
+        state->forward(model, tokens.first(chunk), position);
         if (dump_logits) {
-            for (int i = 0; i < chunk; i++) {
+            for (size_t i = 0; i < chunk; i++) {
                 fwrite(logits(model, state, i), sizeof(float), VOCAB_SIZE, stdout);
             }
         }
+        position += chunk;
+        tokens = tokens.subspan(chunk);
     }
 }
 
@@ -567,7 +573,7 @@ void generate(Model* model, InferenceState* state, const char* prompt, int max_n
         fflush(stdout);
     }
 
-    prefill(model, state, state->token_ids, prompt_tokens, dump_logits);
+    prefill(model, state, std::span(state->token_ids, prompt_tokens), dump_logits);
     if (dump_logits)
         return;
 
@@ -583,7 +589,7 @@ void generate(Model* model, InferenceState* state, const char* prompt, int max_n
 
         fputs(token_text(tokenizer, next_token), stdout);
         fflush(stdout);
-        state->forward(model, &next_token, 1, position);
+        state->forward(model, std::span(&next_token, 1), position);
     }
     putchar('\n');
 }
@@ -610,7 +616,7 @@ void benchmark(Model* model, InferenceState* state, int prefill_tokens, int gene
         for (int i = 0; i < prefill_tokens; i++)
             state->token_ids[i] = 2 + i % 1000;
         double start = time_seconds();
-        prefill(model, state, state->token_ids, prefill_tokens, 0);
+        prefill(model, state, std::span(state->token_ids, prefill_tokens), 0);
         (void)logits(model, state, (prefill_tokens - 1) % BATCH_SIZE);
         printf("pp%d %.2f tok/s\n", prefill_tokens,
                (double)prefill_tokens / (time_seconds() - start));
@@ -620,7 +626,7 @@ void benchmark(Model* model, InferenceState* state, int prefill_tokens, int gene
         double start = time_seconds();
         for (int position = prefill_tokens; position < prefill_tokens + generated_tokens;
              position++) {
-            state->forward(model, &token, 1, position);
+            state->forward(model, std::span(&token, 1), position);
             (void)logits(model, state, 0);
         }
         printf("tg%d@d%d %.2f tok/s\n", generated_tokens, prefill_tokens,
