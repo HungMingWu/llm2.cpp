@@ -13,7 +13,9 @@
 #include <cpuid.h>
 #include <immintrin.h>
 #include <list>
+#include <mdspan>
 #include <omp.h>
+#include <ranges>
 #include <span>
 #include <string>
 #include <vector>
@@ -73,14 +75,12 @@ int apply_bpe_merges(const Tokenizer* tokenizer, std::span<int> tokens) {
         auto best_left_token_node = token_nodes.end();
         auto best_right_token_node = token_nodes.end();
         auto best_merge_rule = merge_rules.end();
-        for (; right_token_node != token_nodes.end();
-             ++left_token_node, ++right_token_node) {
+        for (; right_token_node != token_nodes.end(); ++left_token_node, ++right_token_node) {
             auto merge_rule_it = std::find_if(
                 merge_rules.begin(), merge_rules.end(), [&](const LookupEntry& merge_rule) {
                     int32_t token_pair[2];
                     memcpy(token_pair, merge_rule.key, sizeof(token_pair));
-                    return token_pair[0] == *left_token_node &&
-                           token_pair[1] == *right_token_node;
+                    return token_pair[0] == *left_token_node && token_pair[1] == *right_token_node;
                 });
             if (merge_rule_it != merge_rules.end() &&
                 (best_merge_rule == merge_rules.end() ||
@@ -294,26 +294,35 @@ void geglu(float* gate, const float* up, int rows, int width, int up_stride,
 
 // Looks up packed int8 embedding rows and dequantizes them directly without materializing the full
 // embedding table.
-void embedding(float* output, const Tensor* table, const int* tokens, size_t token_count,
-               float multiplier) {
-    const int block_rows = 16;
-    int width = table->shape[1];
-    int groups = width / 64;
+void embedding(float* output, const Tensor* table, std::span<const int> tokens, float multiplier) {
+    // Embeddings are quantized in 16-row blocks, with each row split into 64-value groups.
+    constexpr int rows_per_block = 16;
+    constexpr int values_per_group = 64;
+    const int embedding_width = table->shape[1];
+    const int groups_per_row = embedding_width / values_per_group;
+
+    // Each packed group is stored as 16 chunks of 4 values, with rows interleaved within a chunk.
+    std::mdspan packed_embeddings((const int8_t*)table->data, table->shape[0], groups_per_row, 16,
+                                  rows_per_block, 4);
+    // Each 64-value group has one half-precision scale per row in the block.
+    std::mdspan row_scales(table->scales, table->shape[0], groups_per_row, rows_per_block);
+    std::mdspan output_vectors(output, tokens.size(), groups_per_row, values_per_group);
 #pragma omp for schedule(static)
-    for (size_t token = 0; token < token_count; token++) {
-        size_t block = (size_t)(tokens[token] / block_rows);
-        int row = tokens[token] % block_rows;
-        float* vector = output + token * width;
-        const int8_t* block_data = (const int8_t*)table->data + block * block_rows * width;
-        const uint16_t* block_scales = table->scales + block * groups * block_rows;
-        for (size_t group_index = 0; group_index < (size_t)groups; group_index++) {
-            const int8_t* group = block_data + group_index * block_rows * 64;
-            float scale = _cvtsh_ss(block_scales[group_index * block_rows + row]) * multiplier;
-            for (int j = 0; j < 64; j++) {
-                int chunk = j / 4;
-                int offset = j % 4;
-                vector[group_index * 64 + j] =
-                    (float)group[chunk * block_rows * 4 + row * 4 + offset] * scale;
+    for (auto [output_row, token_id] : std::ranges::views::enumerate(tokens)) {
+        const size_t block_index = (size_t)(token_id / rows_per_block);
+        const int row_in_block = token_id % rows_per_block;
+        for (int group_index = 0; group_index < groups_per_row; group_index++) {
+            // Convert this row's half-precision quantization scale, then apply the caller's
+            // multiplier.
+            const float scale =
+                _cvtsh_ss(row_scales[block_index, group_index, row_in_block]) * multiplier;
+            for (int value_index = 0; value_index < values_per_group; value_index++) {
+                const int chunk_index = value_index / 4;
+                const int value_in_chunk = value_index % 4;
+                output_vectors[output_row, group_index, value_index] =
+                    (float)packed_embeddings[block_index, group_index, chunk_index, row_in_block,
+                                             value_in_chunk] *
+                    scale;
             }
         }
     }
@@ -417,8 +426,7 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
     {
         float scores[(size_t)start_pos + tokens.size()]; // Each thread needs private scratch large
                                                          // enough for every visible key.
-        embedding(residual, &model->weights.embed, tokens.data(), tokens.size(),
-                  sqrtf((float)HIDDEN_SIZE));
+        embedding(residual, &model->weights.embed, tokens, sqrtf((float)HIDDEN_SIZE));
 
         // Build the token-conditioned input that each transformer layer will receive.
         quantize(quantized, activation_scales, residual, tokens.size(), HIDDEN_SIZE);
@@ -427,8 +435,7 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
         rmsnorm(per_layer_inputs, per_layer_inputs, &model->weights.per_layer_projection_norm,
                 per_layer_width, 1e-6f * HIDDEN_SIZE, tokens.size() * NUM_LAYERS);
 
-        embedding(hidden, &model->weights.embed_per_layer, tokens.data(), tokens.size(),
-                  sqrtf((float)per_layer_width));
+        embedding(hidden, &model->weights.embed_per_layer, tokens, sqrtf((float)per_layer_width));
         add_and_scale(per_layer_inputs, hidden, tokens.size() * NUM_LAYERS * per_layer_width,
                       1.0f / sqrtf(2.0f));
 
