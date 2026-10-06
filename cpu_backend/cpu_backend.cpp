@@ -1,10 +1,20 @@
 module;
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <immintrin.h>
+#include <simd>
 
 module cpu_backend;
 import base;
+
+using f32x8 = std::simd::vec<float, 8>;
+using f32x4 = std::simd::vec<float, 4>;
+
+// workaround for std::simd::fma
+auto fma(auto a, auto b, auto c) {
+    return a * b + c;
+}
 
 // Multiplies dynamically quantized activations by packed int8 weights in blocks of 16
 // output rows. VNNI handles eight input rows at once while AVX2 handles four.
@@ -150,4 +160,40 @@ void softmax(float* values, int count) {
 
     for (int i = 0; i < count; i++)
         values[i] = expf(values[i] - max) / sum;
+}
+
+void attention_scores(float* scores, const float* query, const float* key_cache, int first_key,
+                      int num_keys, int cache_mask, int head_dim) {
+    for (int key_index = 0; key_index < num_keys; key_index++) {
+        const int cache_position = (first_key + key_index) & cache_mask;
+        const float* key_vector = key_cache + cache_position * head_dim;
+
+        // Accumulate products in two sets of eight SIMD lanes.
+        f32x8 partial_dot_0{}, partial_dot_1{};
+        for (int dimension = 0; dimension < head_dim; dimension += 16) {
+            partial_dot_0 =
+                fma(std::simd::unchecked_load<f32x8>(query + dimension, 8),
+                    std::simd::unchecked_load<f32x8>(key_vector + dimension, 8), partial_dot_0);
+            partial_dot_1 =
+                fma(std::simd::unchecked_load<f32x8>(query + dimension + 8, 8),
+                    std::simd::unchecked_load<f32x8>(key_vector + dimension + 8, 8), partial_dot_1);
+        }
+
+        // Fold the eight partial sums into four lanes, then horizontally reduce to one dot product.
+        const f32x4 dot_product_lanes = [&]() {
+            auto [lower_half, upper_half] = std::simd::chunk<f32x4>(partial_dot_0 + partial_dot_1);
+            f32x4 pair_sums = lower_half + upper_half;
+            f32x4 opposite_pair_sums = std::simd::permute(pair_sums, [](auto lane) {
+                constexpr std::array source_lane{2, 3, 2, 3};
+                return source_lane[lane];
+            });
+            pair_sums = pair_sums + opposite_pair_sums;
+            f32x4 other_pair_sums = std::simd::permute(pair_sums, [](auto lane) {
+                constexpr std::array source_lane{1, 1, 3, 3};
+                return source_lane[lane];
+            });
+            return pair_sums + other_pair_sums;
+        }();
+        scores[key_index] = dot_product_lanes[0];
+    }
 }

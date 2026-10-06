@@ -12,4 +12,6 @@ export {
                  size_t row_count);
     void add_and_scale(float* output, const float* addend, size_t count, float scale);
     void softmax(float* values, int count);
+    void attention_scores(float* scores, const float* query, const float* key_cache, int first_key,
+                          int num_keys, int cache_mask, int head_dim);
 }
