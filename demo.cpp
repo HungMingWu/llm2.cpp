@@ -230,22 +230,6 @@ void quantize(int8_t* quantized, float* scales, const float* input, size_t rows,
     }
 }
 
-void weighted_value_sum(float* output, const float* probabilities, const float* value_cache,
-                        int first_key, int num_keys, int cache_mask, int head_dim) {
-    for (int j = 0; j < head_dim; j += 64) {
-        __m256 sum[8] = {0};
-        for (int key_index = 0; key_index < num_keys; key_index++) {
-            const float* value =
-                value_cache + ((first_key + key_index) & cache_mask) * head_dim + j;
-            __m256 probability = _mm256_set1_ps(probabilities[key_index]);
-            for (int u = 0; u < 8; u++)
-                sum[u] = _mm256_fmadd_ps(probability, _mm256_loadu_ps(value + u * 8), sum[u]);
-        }
-        for (int u = 0; u < 8; u++)
-            _mm256_storeu_ps(output + j + u * 8, sum[u]);
-    }
-}
-
 // Approximates GELU from the exported lookup table and multiplies it by the up projection to
 // produce the MLP's gated activation.
 void geglu(float* gate, const float* up, int rows, int width, int up_stride,

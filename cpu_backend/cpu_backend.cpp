@@ -197,3 +197,20 @@ void attention_scores(float* scores, const float* query, const float* key_cache,
         scores[key_index] = dot_product_lanes[0];
     }
 }
+
+void weighted_value_sum(float* output, const float* probabilities, const float* value_cache,
+                        int first_key, int num_keys, int cache_mask, int head_dim) {
+    for (int j = 0; j < head_dim; j += 64) {
+        std::array<f32x8, 8> sum{};
+        for (int key_index = 0; key_index < num_keys; key_index++) {
+            const float* value =
+                value_cache + ((first_key + key_index) & cache_mask) * head_dim + j;
+            f32x8 probability{probabilities[key_index]};
+            for (int u = 0; u < 8; u++)
+                sum[u] =
+                    fma(probability, std::simd::unchecked_load<f32x8>(value + u * 8, 8), sum[u]);
+        }
+        for (int u = 0; u < 8; u++)
+            std::simd::unchecked_store(sum[u], output + j + u * 8, 8);
+    }
+}

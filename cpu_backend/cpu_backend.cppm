@@ -14,4 +14,7 @@ export {
     void softmax(float* values, int count);
     void attention_scores(float* scores, const float* query, const float* key_cache, int first_key,
                           int num_keys, int cache_mask, int head_dim);
+
+    void weighted_value_sum(float* output, const float* probabilities, const float* value_cache,
+                            int first_key, int num_keys, int cache_mask, int head_dim);
 }
