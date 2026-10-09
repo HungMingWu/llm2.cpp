@@ -3,6 +3,7 @@ module;
 #include <cmath>
 #include <cstddef>
 #include <immintrin.h>
+#include <mdspan>
 #include <simd>
 
 module cpu_backend;
@@ -125,19 +126,16 @@ void matmul_int8(float* output, const int8_t* input_q, const float* input_scales
         matmul_block(output, input_q, input_scales, weight, rows, output_block);
 }
 
-void rmsnorm(float* output, const float* input, const Tensor* weight, int width, float epsilon,
-             size_t row_count) {
-    const float* weights = weight ? (const float*)weight->data : NULL;
+void rmsnorm(std::mdspan<float, std::dims<2>> output, std::mdspan<const float, std::dims<2>> input,
+             const float* weights, float epsilon) {
 #pragma omp for schedule(static)
-    for (size_t row = 0; row < row_count; row++) {
-        const float* input_row = input + row * width;
-        float* output_row = output + row * width;
+    for (size_t row = 0; row < input.extent(0); row++) {
         float sum_squares = 0.0f;
-        for (int i = 0; i < width; i++)
-            sum_squares += input_row[i] * input_row[i];
-        float inverse_rms = 1.0f / sqrtf(sum_squares / (float)width + epsilon);
-        for (int i = 0; i < width; i++)
-            output_row[i] = (weights ? weights[i] : 1.0f) * (inverse_rms * input_row[i]);
+        for (size_t i = 0; i < input.extent(1); i++)
+            sum_squares += input[row, i] * input[row, i];
+        float inverse_rms = 1.0f / sqrtf(sum_squares / (float)input.extent(1) + epsilon);
+        for (size_t i = 0; i < input.extent(1); i++)
+            output[row, i] = (weights ? weights[i] : 1.0f) * (inverse_rms * input[row, i]);
     }
 }
 

@@ -340,8 +340,8 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
              weights->q_proj.shape[1]);
     matmul_int8(state->auxiliary, state->quantized, state->activation_scales, &weights->q_proj,
                 token_count);
-    rmsnorm(state->auxiliary, state->auxiliary, &weights->q_norm, head_dim, 1e-6f,
-            token_count * (query_width / head_dim));
+    std::mdspan auxiliary(state->auxiliary, token_count * (query_width / head_dim), head_dim);
+    rmsnorm(auxiliary, auxiliary, (const float*)weights->q_norm.data, 1e-6f);
     apply_rope(&weights->rope_cos, &weights->rope_sin, state->auxiliary, query_width / head_dim,
                head_dim, start_pos, token_count);
 
@@ -354,9 +354,11 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
                     token_count);
         matmul_int8(new_values, state->quantized, state->activation_scales, &weights->v_proj,
                     token_count);
-        rmsnorm(new_keys, new_keys, &weights->k_norm, head_dim, 1e-6f, token_count);
+        std::mdspan new_keys_mdspan(new_keys, token_count, head_dim);
+        std::mdspan new_values_mdspan(new_values, token_count, head_dim);
+        rmsnorm(new_keys_mdspan, new_keys_mdspan, (const float*)weights->k_norm.data, 1e-6f);
         // Value vectors are normalized without a learned weight.
-        rmsnorm(new_values, new_values, NULL, head_dim, 1e-6f, token_count);
+        rmsnorm(new_values_mdspan, new_values_mdspan, nullptr, 1e-6f);
         apply_rope(&weights->rope_cos, &weights->rope_sin, new_keys, 1, head_dim, start_pos,
                    token_count);
     }
@@ -399,8 +401,10 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
         quantize(quantized, activation_scales, residual, tokens.size(), HIDDEN_SIZE);
         matmul_int8(per_layer_inputs, quantized, activation_scales,
                     &model->weights.per_layer_model_projection, tokens.size());
-        rmsnorm(per_layer_inputs, per_layer_inputs, &model->weights.per_layer_projection_norm,
-                per_layer_width, 1e-6f * HIDDEN_SIZE, tokens.size() * NUM_LAYERS);
+        std::mdspan per_layer_inputs_mdspan(per_layer_inputs, tokens.size() * NUM_LAYERS,
+                                            per_layer_width);
+        rmsnorm(per_layer_inputs_mdspan, per_layer_inputs_mdspan,
+                (const float*)model->weights.per_layer_projection_norm.data, 1e-6f * HIDDEN_SIZE);
 
         embedding(hidden, &model->weights.embed_per_layer, tokens, sqrtf((float)per_layer_width));
         add_and_scale(per_layer_inputs, hidden, tokens.size() * NUM_LAYERS * per_layer_width,
@@ -410,16 +414,19 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
             LayerWeights* weights = &model->weights.layers[layer];
 
             // Attention, normalized and added back onto the residual stream.
-            rmsnorm(hidden, residual, &weights->input_layernorm, HIDDEN_SIZE, 1e-6f, tokens.size());
+            std::mdspan hidden_mdspan(hidden, tokens.size(), HIDDEN_SIZE);
+            std::mdspan residual_mdspan(residual, tokens.size(), HIDDEN_SIZE);
+            rmsnorm(hidden_mdspan, residual_mdspan, (const float*)weights->input_layernorm.data,
+                    1e-6f);
             attention(this, model->weights.layers, layer, start_pos, tokens.size(), scores);
-            rmsnorm(hidden, hidden, &weights->post_attn_layernorm, HIDDEN_SIZE, 1e-6f,
-                    tokens.size());
+            rmsnorm(hidden_mdspan, hidden_mdspan, (const float*)weights->post_attn_layernorm.data,
+                    1e-6f);
             add_and_scale(residual, hidden, tokens.size() * HIDDEN_SIZE, 1.0f);
 
             // Feed-forward network, down(gelu(gate) * up), quantizing activations to int8 before
             // each matmul.
-            rmsnorm(hidden, residual, &weights->pre_ffn_layernorm, HIDDEN_SIZE, 1e-6f,
-                    tokens.size());
+            rmsnorm(hidden_mdspan, residual_mdspan, (const float*)weights->pre_ffn_layernorm.data,
+                    1e-6f);
             quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->gate_proj.shape[1]);
             matmul_int8(hidden, quantized, activation_scales, &weights->gate_proj, tokens.size());
@@ -429,8 +436,8 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
             quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->down_proj.shape[1]);
             matmul_int8(hidden, quantized, activation_scales, &weights->down_proj, tokens.size());
-            rmsnorm(hidden, hidden, &weights->post_ffn_layernorm, HIDDEN_SIZE, 1e-6f,
-                    tokens.size());
+            rmsnorm(hidden_mdspan, hidden_mdspan, (const float*)weights->post_ffn_layernorm.data,
+                    1e-6f);
             add_and_scale(residual, hidden, tokens.size() * HIDDEN_SIZE, 1.0f);
 
             // This layer's per-layer embedding row, gated and added with a learned scale.
@@ -443,8 +450,8 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
                      weights->per_layer_projection.shape[1]);
             matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_projection,
                         tokens.size());
-            rmsnorm(hidden, hidden, &weights->post_per_layer_input_norm, HIDDEN_SIZE, 1e-6f,
-                    tokens.size());
+            rmsnorm(hidden_mdspan, hidden_mdspan,
+                    (const float*)weights->post_per_layer_input_norm.data, 1e-6f);
             add_and_scale(residual, hidden, tokens.size() * HIDDEN_SIZE,
                           ((float*)weights->layer_scalar.data)[0]);
         }
@@ -456,8 +463,9 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
 float* logits(Model* model, InferenceState* state, size_t token) {
 #pragma omp parallel num_threads(thread_count())
     {
-        rmsnorm(state->hidden, state->residual + token * HIDDEN_SIZE, &model->weights.norm,
-                HIDDEN_SIZE, 1e-6f, 1);
+        rmsnorm(std::mdspan(state->hidden, 1, HIDDEN_SIZE),
+                std::mdspan(state->residual + token * HIDDEN_SIZE, 1, HIDDEN_SIZE),
+                (const float*)model->weights.norm.data, 1e-6f);
         quantize(state->quantized, state->activation_scales, state->hidden, 1, HIDDEN_SIZE);
         matmul_int8(state->hidden, state->quantized, state->activation_scales,
                     &model->weights.embed, 1);
