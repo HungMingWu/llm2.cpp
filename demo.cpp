@@ -373,11 +373,15 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
                                 : 0;
             int num_keys = start_pos + (int)token + 1 - first_key;
             float* head_output = state->hidden + token * query_width + head * head_dim;
-            const float* query = state->auxiliary + token * query_width + head * head_dim;
-            attention_scores(scores, query, key_cache, first_key, num_keys, cache_mask, head_dim);
+            std::mdspan query = [&]() {
+                std::mdspan query(state->auxiliary, token_count, query_width / head_dim, head_dim);
+                return std::submdspan(query, token, head, std::full_extent);
+            }();
+            attention_scores(scores, query, std::mdspan(key_cache, cache_len, head_dim), first_key,
+                             num_keys);
             softmax(scores, num_keys);
-            weighted_value_sum(head_output, scores, value_cache, first_key, num_keys, cache_mask,
-                               head_dim);
+            weighted_value_sum(head_output, scores, std::mdspan(value_cache, cache_len, head_dim),
+                               first_key, num_keys);
         }
     }
 

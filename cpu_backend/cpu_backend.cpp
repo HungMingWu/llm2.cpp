@@ -160,21 +160,23 @@ void softmax(float* values, int count) {
         values[i] = expf(values[i] - max) / sum;
 }
 
-void attention_scores(float* scores, const float* query, const float* key_cache, int first_key,
-                      int num_keys, int cache_mask, int head_dim) {
+void attention_scores(float* scores, std::mdspan<const float, std::dims<1>> query,
+                      std::mdspan<const float, std::dims<2>> key_cache, int first_key,
+                      int num_keys) {
     for (int key_index = 0; key_index < num_keys; key_index++) {
-        const int cache_position = (first_key + key_index) & cache_mask;
-        const float* key_vector = key_cache + cache_position * head_dim;
+        const int cache_position = (first_key + key_index) % key_cache.extent(0);
 
         // Accumulate products in two sets of eight SIMD lanes.
         f32x8 partial_dot_0{}, partial_dot_1{};
-        for (int dimension = 0; dimension < head_dim; dimension += 16) {
+        for (int dimension = 0; dimension < query.extent(0); dimension += 16) {
             partial_dot_0 =
-                fma(std::simd::unchecked_load<f32x8>(query + dimension, 8),
-                    std::simd::unchecked_load<f32x8>(key_vector + dimension, 8), partial_dot_0);
+                fma(std::simd::unchecked_load<f32x8>(&query[dimension], 8),
+                    std::simd::unchecked_load<f32x8>(&key_cache[cache_position, dimension], 8),
+                    partial_dot_0);
             partial_dot_1 =
-                fma(std::simd::unchecked_load<f32x8>(query + dimension + 8, 8),
-                    std::simd::unchecked_load<f32x8>(key_vector + dimension + 8, 8), partial_dot_1);
+                fma(std::simd::unchecked_load<f32x8>(&query[dimension + 8], 8),
+                    std::simd::unchecked_load<f32x8>(&key_cache[cache_position, dimension + 8], 8),
+                    partial_dot_1);
         }
 
         // Fold the eight partial sums into four lanes, then horizontally reduce to one dot product.
@@ -196,19 +198,21 @@ void attention_scores(float* scores, const float* query, const float* key_cache,
     }
 }
 
-void weighted_value_sum(float* output, const float* probabilities, const float* value_cache,
-                        int first_key, int num_keys, int cache_mask, int head_dim) {
-    for (int j = 0; j < head_dim; j += 64) {
+void weighted_value_sum(float* output, const float* probabilities,
+                        std::mdspan<const float, std::dims<2>> value_cache, int first_key,
+                        int num_keys) {
+    for (size_t j = 0; j < value_cache.extent(1); j += 64) {
         std::array<f32x8, 8> sum{};
         for (int key_index = 0; key_index < num_keys; key_index++) {
-            const float* value =
-                value_cache + ((first_key + key_index) & cache_mask) * head_dim + j;
+            const int cache_position = (first_key + key_index) % value_cache.extent(0);
             f32x8 probability{probabilities[key_index]};
-            for (int u = 0; u < 8; u++)
-                sum[u] =
-                    fma(probability, std::simd::unchecked_load<f32x8>(value + u * 8, 8), sum[u]);
+            for (size_t u = 0; u < 8; u++)
+                sum[u] = fma(
+                    probability,
+                    std::simd::unchecked_load<f32x8>(&value_cache[cache_position, j + u * 8], 8),
+                    sum[u]);
         }
-        for (int u = 0; u < 8; u++)
+        for (size_t u = 0; u < 8; u++)
             std::simd::unchecked_store(sum[u], output + j + u * 8, 8);
     }
 }
