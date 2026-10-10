@@ -229,30 +229,14 @@ void quantize(int8_t* quantized, float* scales, const float* input, size_t rows,
     }
 }
 
-// Approximates GELU from the exported lookup table and multiplies it by the up projection to
-// produce the MLP's gated activation.
-void geglu(float* gate, const float* up, int rows, int width, int up_stride,
+void geglu(std::mdspan<float, std::dims<2>> gate, std::mdspan<const float, std::dims<2>> up,
            const Tensor* gelu_table) {
     const float* table = (const float*)gelu_table->data;
     const int table_size = gelu_table->shape[0];
     const float lower = (float)gelu_table->shape[1];
     const float upper = (float)gelu_table->shape[2];
     const float scale = (float)(table_size - 1) / (upper - lower);
-#pragma omp for collapse(2) schedule(static)
-    for (int row = 0; row < rows; row++) {
-        for (int i = 0; i < width; i++) {
-            float x = gate[row * width + i];
-            if (x <= lower) {
-                x = table[0];
-            } else if (!(x >= upper)) {
-                float position = (x - lower) * scale;
-                int index = (int)position;
-                float fraction = position - (float)index;
-                x = table[index] + fraction * (table[index + 1] - table[index]);
-            }
-            gate[row * width + i] = x * up[row * up_stride + i];
-        }
-    }
+    return geglu(gate, up, std::span(table, table_size), lower, upper, scale);
 }
 
 // ----------------------------------------------------------------------------
@@ -402,8 +386,9 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
                      weights->gate_proj.shape[1]);
             matmul_int8(hidden, quantized, activation_scales, &weights->gate_proj, tokens.size());
             matmul_int8(auxiliary, quantized, activation_scales, &weights->up_proj, tokens.size());
-            geglu(hidden, auxiliary, tokens.size(), weights->gate_proj.shape[0],
-                  weights->gate_proj.shape[0], &model->weights.gelu_table);
+            geglu(std::mdspan(hidden, tokens.size(), weights->gate_proj.shape[0]),
+                  std::mdspan(auxiliary, tokens.size(), weights->gate_proj.shape[0]),
+                  &model->weights.gelu_table);
             quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->down_proj.shape[1]);
             matmul_int8(hidden, quantized, activation_scales, &weights->down_proj, tokens.size());
@@ -415,8 +400,10 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
             quantize(quantized, activation_scales, residual, tokens.size(), HIDDEN_SIZE);
             matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_input_gate,
                         tokens.size());
-            geglu(hidden, per_layer_inputs + layer * per_layer_width, tokens.size(),
-                  per_layer_width, NUM_LAYERS * per_layer_width, &model->weights.gelu_table);
+            geglu(std::mdspan(hidden, tokens.size(), per_layer_width),
+                  std::mdspan(per_layer_inputs + layer * per_layer_width, tokens.size(),
+                              NUM_LAYERS * per_layer_width),
+                  &model->weights.gelu_table);
             quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->per_layer_projection.shape[1]);
             matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_projection,

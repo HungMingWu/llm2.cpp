@@ -29,4 +29,10 @@ export {
     void apply_rope(std::mdspan<const float, std::dims<2>> cosine,
                     std::mdspan<const float, std::dims<2>> sine,
                     std::mdspan<float, std::dims<3>> vector, int start_pos);
+
+    // Approximates GELU from the exported lookup table and multiplies it by the up projection to
+    // produce the MLP's gated activation.
+    void geglu(std::mdspan<float, std::dims<2>> gate, std::mdspan<const float, std::dims<2>> up,
+               std::span<const float> table, const float lower, const float upper,
+               const float scale);
 }

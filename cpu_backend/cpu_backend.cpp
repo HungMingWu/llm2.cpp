@@ -262,3 +262,22 @@ void apply_rope(std::mdspan<const float, std::dims<2>> cosine,
         }
     }
 }
+
+void geglu(std::mdspan<float, std::dims<2>> gate, std::mdspan<const float, std::dims<2>> up,
+           std::span<const float> table, const float lower, const float upper, const float scale) {
+#pragma omp for collapse(2) schedule(static)
+    for (size_t row = 0; row < gate.extent(0); row++) {
+        for (size_t i = 0; i < gate.extent(1); i++) {
+            float x = gate[row, i];
+            if (x <= lower) {
+                x = table[0];
+            } else if (!(x >= upper)) {
+                float position = (x - lower) * scale;
+                int index = (int)position;
+                float fraction = position - (float)index;
+                x = table[index] + fraction * (table[index + 1] - table[index]);
+            }
+            gate[row, i] = x * up[row, i];
+        }
+    }
+}
