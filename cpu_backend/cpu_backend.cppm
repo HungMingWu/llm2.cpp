@@ -2,7 +2,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <mdspan>
-#
+
 export module cpu_backend;
 import base;
 
@@ -20,4 +20,8 @@ export {
                             int num_keys);
     void rmsnorm(std::mdspan<float, std::dims<2>> output,
                  std::mdspan<const float, std::dims<2>> input, const float* weights, float epsilon);
+    void embedding(std::mdspan<float, std::dims<3>> output,
+                   std::mdspan<const int8_t, std::dims<5>> packed_embeddings,
+                   std::mdspan<const uint16_t, std::dims<3>> row_scales,
+                   std::span<const int> tokens, float multiplier);
 }

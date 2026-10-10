@@ -4,6 +4,7 @@ module;
 #include <cstddef>
 #include <immintrin.h>
 #include <mdspan>
+#include <ranges>
 #include <simd>
 
 module cpu_backend;
@@ -214,5 +215,31 @@ void weighted_value_sum(float* output, const float* probabilities,
         }
         for (size_t u = 0; u < 8; u++)
             std::simd::unchecked_store(sum[u], output + j + u * 8, 8);
+    }
+}
+
+void embedding(std::mdspan<float, std::dims<3>> output,
+               std::mdspan<const int8_t, std::dims<5>> packed_embeddings,
+               std::mdspan<const uint16_t, std::dims<3>> row_scales, std::span<const int> tokens,
+               float multiplier) {
+    // Each 64-value group has one half-precision scale per row in the block.
+#pragma omp for schedule(static)
+    for (auto [output_row, token_id] : std::ranges::views::enumerate(tokens)) {
+        const size_t block_index = (size_t)(token_id / packed_embeddings.extent(3));
+        const int row_in_block = token_id % packed_embeddings.extent(3);
+        for (size_t group_index = 0; group_index < packed_embeddings.extent(1); group_index++) {
+            // Convert this row's half-precision quantization scale, then apply the caller's
+            // multiplier.
+            const float scale =
+                _cvtsh_ss(row_scales[block_index, group_index, row_in_block]) * multiplier;
+            for (size_t value_index = 0; value_index < output.extent(2); value_index++) {
+                const int chunk_index = value_index / 4;
+                const int value_in_chunk = value_index % 4;
+                output[output_row, group_index, value_index] =
+                    (float)packed_embeddings[block_index, group_index, chunk_index, row_in_block,
+                                             value_in_chunk] *
+                    scale;
+            }
+        }
     }
 }

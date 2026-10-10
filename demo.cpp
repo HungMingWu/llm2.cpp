@@ -15,7 +15,6 @@
 #include <list>
 #include <mdspan>
 #include <omp.h>
-#include <ranges>
 #include <span>
 #include <string>
 #include <vector>
@@ -260,7 +259,7 @@ void geglu(float* gate, const float* up, int rows, int width, int up_stride,
 // Transformer
 
 // Looks up packed int8 embedding rows and dequantizes them directly without materializing the full
-// embedding table.
+// embedding table
 void embedding(float* output, const Tensor* table, std::span<const int> tokens, float multiplier) {
     // Embeddings are quantized in 16-row blocks, with each row split into 64-value groups.
     constexpr int rows_per_block = 16;
@@ -271,28 +270,9 @@ void embedding(float* output, const Tensor* table, std::span<const int> tokens, 
     // Each packed group is stored as 16 chunks of 4 values, with rows interleaved within a chunk.
     std::mdspan packed_embeddings((const int8_t*)table->data, table->shape[0], groups_per_row, 16,
                                   rows_per_block, 4);
-    // Each 64-value group has one half-precision scale per row in the block.
     std::mdspan row_scales(table->scales, table->shape[0], groups_per_row, rows_per_block);
-    std::mdspan output_vectors(output, tokens.size(), groups_per_row, values_per_group);
-#pragma omp for schedule(static)
-    for (auto [output_row, token_id] : std::ranges::views::enumerate(tokens)) {
-        const size_t block_index = (size_t)(token_id / rows_per_block);
-        const int row_in_block = token_id % rows_per_block;
-        for (int group_index = 0; group_index < groups_per_row; group_index++) {
-            // Convert this row's half-precision quantization scale, then apply the caller's
-            // multiplier.
-            const float scale =
-                _cvtsh_ss(row_scales[block_index, group_index, row_in_block]) * multiplier;
-            for (int value_index = 0; value_index < values_per_group; value_index++) {
-                const int chunk_index = value_index / 4;
-                const int value_in_chunk = value_index % 4;
-                output_vectors[output_row, group_index, value_index] =
-                    (float)packed_embeddings[block_index, group_index, chunk_index, row_in_block,
-                                             value_in_chunk] *
-                    scale;
-            }
-        }
-    }
+    std::mdspan output_mdspan(output, tokens.size(), groups_per_row, values_per_group);
+    embedding(output_mdspan, packed_embeddings, row_scales, tokens, multiplier);
 }
 
 // Rotates pairs of query or key channels using each position's sine and cosine values so attention
