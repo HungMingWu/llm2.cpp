@@ -259,7 +259,7 @@ void embedding(float* output, const Tensor* table, std::span<const int> tokens, 
     embedding(output_mdspan, packed_embeddings, row_scales, tokens, multiplier);
 }
 
-void apply_rope(const Tensor* cosines, const Tensor* sines, std::mdspan<float, std::dims<3>> vector, 
+void apply_rope(const Tensor* cosines, const Tensor* sines, std::mdspan<float, std::dims<3>> vector,
                 int start_pos) {
     std::mdspan cosine((const float*)cosines->data, cosines->shape[0], cosines->shape[1]);
     std::mdspan sine((const float*)sines->data, sines->shape[0], sines->shape[1]);
@@ -273,17 +273,16 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
     const LayerWeights* weights = &layers[layer];
     int full_attention = layer % 5 == 4; // Every fifth layer uses full attention.
     int cache_len = full_attention ? MAX_CONTEXT : SLIDING_WINDOW + BATCH_SIZE;
-    int cache_mask =
-        cache_len -
-        1; // Both cache lengths are powers of two, so masking wraps positions without division.
     int head_dim = weights->q_norm.shape[0];
     int query_width = weights->q_proj.shape[0];
     int cache_owner = layer;
     while (!layers[cache_owner].k_proj.data || (cache_owner % 5 == 4) != full_attention)
         cache_owner--; // Shared layers reuse the latest cache of the same attention type.
-    float* key_cache = full_attention ? state->full_cache[cache_owner / 5]
-                                      : state->sliding_cache[cache_owner / 5][cache_owner % 5];
-    float* value_cache = key_cache + (size_t)cache_len * head_dim;
+    float* key_value_cache = full_attention
+                                 ? state->full_cache[cache_owner / 5]
+                                 : state->sliding_cache[cache_owner / 5][cache_owner % 5];
+    std::mdspan key_cache(key_value_cache, cache_len, head_dim);
+    std::mdspan value_cache(key_value_cache + (size_t)cache_len * head_dim, cache_len, head_dim);
 
     // Build the queries for every token in the batch.
     quantize(state->quantized, state->activation_scales, state->hidden, token_count,
@@ -299,17 +298,21 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
     // Compute keys and values and write them to the cache. Only the first 15 layers
     // have these weights, every other layer reads a cache an earlier layer filled.
     if (weights->k_proj.data) {
-        float* new_keys = key_cache + ((size_t)start_pos & cache_mask) * head_dim;
-        float* new_values = value_cache + ((size_t)start_pos & cache_mask) * head_dim;
+        float* new_keys = &key_cache[start_pos % cache_len, 0];
+        float* new_values = &value_cache[start_pos % cache_len, 0];
         matmul_int8(new_keys, state->quantized, state->activation_scales, &weights->k_proj,
                     token_count);
         matmul_int8(new_values, state->quantized, state->activation_scales, &weights->v_proj,
                     token_count);
-        std::mdspan new_keys_mdspan(new_keys, token_count, head_dim);
-        std::mdspan new_values_mdspan(new_values, token_count, head_dim);
-        rmsnorm(new_keys_mdspan, new_keys_mdspan, (const float*)weights->k_norm.data, 1e-6f);
+        std::mdspan sliding_key_cache = std::submdspan(
+            key_cache, std::pair{start_pos % cache_len, start_pos % cache_len + token_count},
+            std::full_extent);
+        std::mdspan sliding_value_cache = std::submdspan(
+            value_cache, std::pair{start_pos % cache_len, start_pos % cache_len + token_count},
+            std::full_extent);
+        rmsnorm(sliding_key_cache, sliding_key_cache, (const float*)weights->k_norm.data, 1e-6f);
         // Value vectors are normalized without a learned weight.
-        rmsnorm(new_values_mdspan, new_values_mdspan, nullptr, 1e-6f);
+        rmsnorm(sliding_value_cache, sliding_value_cache, nullptr, 1e-6f);
         apply_rope(&weights->rope_cos, &weights->rope_sin,
                    std::mdspan(new_keys, token_count, 1, head_dim), start_pos);
     }
@@ -328,11 +331,9 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
                 std::mdspan query(state->auxiliary, token_count, query_width / head_dim, head_dim);
                 return std::submdspan(query, token, head, std::full_extent);
             }();
-            attention_scores(scores, query, std::mdspan(key_cache, cache_len, head_dim), first_key,
-                             num_keys);
+            attention_scores(scores, query, key_cache, first_key, num_keys);
             softmax(scores, num_keys);
-            weighted_value_sum(head_output, scores, std::mdspan(value_cache, cache_len, head_dim),
-                               first_key, num_keys);
+            weighted_value_sum(head_output, scores, value_cache, first_key, num_keys);
         }
     }
 
