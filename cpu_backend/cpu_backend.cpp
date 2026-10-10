@@ -243,3 +243,22 @@ void embedding(std::mdspan<float, std::dims<3>> output,
         }
     }
 }
+
+void apply_rope(std::mdspan<const float, std::dims<2>> cosine,
+                std::mdspan<const float, std::dims<2>> sine,
+                std::mdspan<float, std::dims<3>> vector, int start_pos) {
+    const size_t head_dim = vector.extent(2);
+#pragma omp for schedule(static)
+    for (size_t token = 0; token < vector.extent(0); token++) {
+        for (size_t head = 0; head < vector.extent(1); head++) {
+            for (size_t j = 0; j < cosine.extent(1); j++) {
+                float first = vector[token, head, j];
+                float second = vector[token, head, j + head_dim / 2];
+                vector[token, head, j] =
+                    first * cosine[start_pos + token, j] - second * sine[start_pos + token, j];
+                vector[token, head, j + head_dim / 2] =
+                    second * cosine[start_pos + token, j] + first * sine[start_pos + token, j];
+            }
+        }
+    }
+}

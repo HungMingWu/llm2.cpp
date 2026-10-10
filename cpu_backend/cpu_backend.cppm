@@ -24,4 +24,9 @@ export {
                    std::mdspan<const int8_t, std::dims<5>> packed_embeddings,
                    std::mdspan<const uint16_t, std::dims<3>> row_scales,
                    std::span<const int> tokens, float multiplier);
+    // Rotates pairs of query or key channels using each position's sine and cosine values so
+    // attention can distinguish token order.
+    void apply_rope(std::mdspan<const float, std::dims<2>> cosine,
+                    std::mdspan<const float, std::dims<2>> sine,
+                    std::mdspan<float, std::dims<3>> vector, int start_pos);
 }

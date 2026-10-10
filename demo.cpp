@@ -275,25 +275,11 @@ void embedding(float* output, const Tensor* table, std::span<const int> tokens, 
     embedding(output_mdspan, packed_embeddings, row_scales, tokens, multiplier);
 }
 
-// Rotates pairs of query or key channels using each position's sine and cosine values so attention
-// can distinguish token order.
-void apply_rope(const Tensor* cosines, const Tensor* sines, float* vectors, int num_heads,
-                int head_dim, int start_pos, size_t token_count) {
-    int pairs = cosines->shape[1];
-#pragma omp for schedule(static)
-    for (size_t token = 0; token < token_count; token++) {
-        const float* cosine = (float*)cosines->data + (start_pos + token) * pairs;
-        const float* sine = (float*)sines->data + (start_pos + token) * pairs;
-        for (size_t head = 0; head < (size_t)num_heads; head++) {
-            float* vector = vectors + (token * num_heads + head) * head_dim;
-            for (int j = 0; j < pairs; j++) {
-                float first = vector[j];
-                float second = vector[j + head_dim / 2];
-                vector[j] = first * cosine[j] - second * sine[j];
-                vector[j + head_dim / 2] = second * cosine[j] + first * sine[j];
-            }
-        }
-    }
+void apply_rope(const Tensor* cosines, const Tensor* sines, std::mdspan<float, std::dims<3>> vector, 
+                int start_pos) {
+    std::mdspan cosine((const float*)cosines->data, cosines->shape[0], cosines->shape[1]);
+    std::mdspan sine((const float*)sines->data, sines->shape[0], sines->shape[1]);
+    return apply_rope(cosine, sine, vector, start_pos);
 }
 
 // Builds queries, updates the KV cache, and computes causal attention over 512 tokens or the full
@@ -322,8 +308,9 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
                 token_count);
     std::mdspan auxiliary(state->auxiliary, token_count * (query_width / head_dim), head_dim);
     rmsnorm(auxiliary, auxiliary, (const float*)weights->q_norm.data, 1e-6f);
-    apply_rope(&weights->rope_cos, &weights->rope_sin, state->auxiliary, query_width / head_dim,
-               head_dim, start_pos, token_count);
+    apply_rope(&weights->rope_cos, &weights->rope_sin,
+               std::mdspan(state->auxiliary, token_count, query_width / head_dim, head_dim),
+               start_pos);
 
     // Compute keys and values and write them to the cache. Only the first 15 layers
     // have these weights, every other layer reads a cache an earlier layer filled.
@@ -339,8 +326,8 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
         rmsnorm(new_keys_mdspan, new_keys_mdspan, (const float*)weights->k_norm.data, 1e-6f);
         // Value vectors are normalized without a learned weight.
         rmsnorm(new_values_mdspan, new_values_mdspan, nullptr, 1e-6f);
-        apply_rope(&weights->rope_cos, &weights->rope_sin, new_keys, 1, head_dim, start_pos,
-                   token_count);
+        apply_rope(&weights->rope_cos, &weights->rope_sin,
+                   std::mdspan(new_keys, token_count, 1, head_dim), start_pos);
     }
 
 // Each head scores its query against the visible keys and averages their values.
