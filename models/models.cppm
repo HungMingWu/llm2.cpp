@@ -58,7 +58,7 @@ export {
         LookupEntry merges[514906];      // This checkpoint contains 514,906 merge rules.
     };
 
-    struct Model {
+    struct Gemma4 {
         char magic[4];
         Tokenizer tokenizer;
         ModelWeights weights;

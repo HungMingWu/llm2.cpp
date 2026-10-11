@@ -181,7 +181,7 @@ struct InferenceState {
                                                 // full-attention KV caches.
     int token_ids[MAX_CONTEXT];                 // Holds the tokenized prompt before prefill.
   public:
-    void forward(Model* model, std::span<const int> tokens, int start_pos);
+    void forward(Gemma4* model, std::span<const int> tokens, int start_pos);
 };
 
 // Verifies that the compiler laid out the memory-mapped model exactly as the exporter expects.
@@ -189,7 +189,7 @@ static_assert(sizeof(int) == 4 && sizeof(float) == 4 && sizeof(void*) == 8 &&
                   sizeof(VocabEntry) == 100 && offsetof(VocabEntry, id) == 96 &&
                   sizeof(LookupEntry) == 16 && sizeof(Tokenizer) == 33429932 &&
                   sizeof(Tensor) == 32 && sizeof(ModelWeights) == 21472 &&
-                  sizeof(Model) == 33451408 && offsetof(Model, weights) == 33429936 &&
+                  sizeof(Gemma4) == 33451408 && offsetof(Gemma4, weights) == 33429936 &&
                   BATCH_SIZE == SLIDING_WINDOW &&
                   !((SLIDING_WINDOW + BATCH_SIZE) & (SLIDING_WINDOW + BATCH_SIZE - 1)) &&
                   !(MAX_CONTEXT & (MAX_CONTEXT - 1)),
@@ -344,7 +344,7 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
                 token_count);
 }
 
-void InferenceState::forward(Model* model, std::span<const int> tokens, int start_pos) {
+void InferenceState::forward(Gemma4* model, std::span<const int> tokens, int start_pos) {
     int per_layer_width = model->weights.per_layer_projection_norm.shape[0];
 // One OpenMP team stays alive for the full forward pass while each kernel divides its own loop.
 #pragma omp parallel num_threads(thread_count())
@@ -419,7 +419,7 @@ void InferenceState::forward(Model* model, std::span<const int> tokens, int star
 
 // Reuses the embedding matrix to turn the final token representation into vocabulary logits, then
 // applies Gemma's tanh soft cap.
-float* logits(Model* model, InferenceState* state, size_t token) {
+float* logits(Gemma4* model, InferenceState* state, size_t token) {
 #pragma omp parallel num_threads(thread_count())
     {
         rmsnorm(std::mdspan(state->hidden, 1, HIDDEN_SIZE),
@@ -489,7 +489,7 @@ int sample(float* logits, int vocab_size, float temperature) {
     return top[count - 1].token;
 }
 
-void prefill(Model* model, InferenceState* state, std::span<const int> tokens, int dump_logits) {
+void prefill(Gemma4* model, InferenceState* state, std::span<const int> tokens, int dump_logits) {
     int position = 0;
     while (!tokens.empty()) {
         size_t chunk = std::min(tokens.size(), static_cast<size_t>(BATCH_SIZE));
@@ -504,7 +504,7 @@ void prefill(Model* model, InferenceState* state, std::span<const int> tokens, i
     }
 }
 
-void generate(Model* model, InferenceState* state, const char* prompt, int max_new_tokens,
+void generate(Gemma4* model, InferenceState* state, const char* prompt, int max_new_tokens,
               float temperature, int dump_logits) {
     Tokenizer* tokenizer = &model->tokenizer;
     int styled = !dump_logits && isatty(STDOUT_FILENO);
@@ -563,7 +563,7 @@ double time_seconds(void) {
 #endif
 }
 
-void benchmark(Model* model, InferenceState* state, int prefill_tokens, int generated_tokens) {
+void benchmark(Gemma4* model, InferenceState* state, int prefill_tokens, int generated_tokens) {
     if (prefill_tokens > 0) {
         for (int i = 0; i < prefill_tokens; i++)
             state->token_ids[i] = 2 + i % 1000;
@@ -606,7 +606,7 @@ int main(int argc, char** argv) {
                                     return file.map({.access = io::map_access::copy_on_write});
                                 });
     assert(mmio_file_region.has_value());
-    Model* model = (Model*)mmio_file_region.value().data();
+    Gemma4* model = (Gemma4*)mmio_file_region.value().data();
     if (memcmp(model->magic, "MOG", 4) != 0) {
         fprintf(stderr, "bad model file\n");
         return 1;
