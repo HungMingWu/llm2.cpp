@@ -419,7 +419,7 @@ void InferenceState::forward(Gemma4* model, std::span<const int> tokens, int sta
 
 // Reuses the embedding matrix to turn the final token representation into vocabulary logits, then
 // applies Gemma's tanh soft cap.
-float* logits(Gemma4* model, InferenceState* state, size_t token) {
+std::span<const float> logits(Gemma4* model, InferenceState* state, size_t token) {
 #pragma omp parallel num_threads(thread_count())
     {
         rmsnorm(std::mdspan(state->hidden, 1, HIDDEN_SIZE),
@@ -432,7 +432,7 @@ float* logits(Gemma4* model, InferenceState* state, size_t token) {
         for (int i = 0; i < VOCAB_SIZE; i++)
             state->hidden[i] = 30.0f * tanhf(state->hidden[i] / 30.0f);
     }
-    return state->hidden;
+    return std::span(state->hidden, VOCAB_SIZE);
 }
 
 // ----------------------------------------------------------------------------
@@ -447,13 +447,10 @@ float random_uniform(void) {
     return (float)((rng_state * 0x2545F4914F6CDD1DULL) >> 40) / 16777216.0f;
 }
 
-int sample(float* logits, int vocab_size, float temperature) {
+int sample(std::span<const float> logits, float temperature) {
     if (temperature <= 0.0f) {
-        int best = 0;
-        for (int i = 1; i < vocab_size; i++)
-            if (logits[i] > logits[best])
-                best = i;
-        return best;
+        auto it = std::max_element(logits.begin(), logits.end());
+        return static_cast<int>(std::distance(logits.begin(), it));
     }
 
     struct {
@@ -462,7 +459,7 @@ int sample(float* logits, int vocab_size, float temperature) {
     } top[64]; // Sampling considers only the 64 highest logits.
     for (int i = 0; i < 64; i++)
         top[i].score = -INFINITY;
-    for (int token = 0; token < vocab_size; token++) {
+    for (size_t token = 0; token < logits.size(); token++) {
         if (logits[token] <= top[63].score)
             continue;
         int i = 63;
@@ -496,7 +493,8 @@ void prefill(Gemma4* model, InferenceState* state, std::span<const int> tokens, 
         state->forward(model, tokens.first(chunk), position);
         if (dump_logits) {
             for (size_t i = 0; i < chunk; i++) {
-                fwrite(logits(model, state, i), sizeof(float), VOCAB_SIZE, stdout);
+                std::span<const float> logit_ = logits(model, state, i);
+                fwrite(&logit_[0], sizeof(float), logit_.size(), stdout);
             }
         }
         position += chunk;
@@ -535,7 +533,7 @@ void generate(Gemma4* model, InferenceState* state, const char* prompt, int max_
     for (int position = prompt_tokens; position < end; position++) {
         int next_token = sample(
             logits(model, state, position == prompt_tokens ? (prompt_tokens - 1) % BATCH_SIZE : 0),
-            VOCAB_SIZE, temperature);
+            temperature);
         if (next_token == 1 || next_token == 106)
             break; // Stop at <eos> or <turn|>.
 
