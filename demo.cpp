@@ -16,6 +16,7 @@
 #include <mdspan>
 #include <omp.h>
 #include <span>
+#include <stdfloat>
 #include <string>
 #include <vector>
 
@@ -613,8 +614,9 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < sizeof(model->weights) / sizeof(*tensors); i++) {
         tensors[i].data =
             tensors[i].data ? (void*)((uint8_t*)model + (uintptr_t)tensors[i].data) : NULL;
-        tensors[i].scales =
-            tensors[i].scales ? (uint16_t*)((uint8_t*)model + (uintptr_t)tensors[i].scales) : NULL;
+        tensors[i].scales = tensors[i].scales
+                                ? (std::float16_t*)((uint8_t*)model + (uintptr_t)tensors[i].scales)
+                                : NULL;
     }
     InferenceState* state = (InferenceState*)calloc(1, sizeof(*state));
 

@@ -2,6 +2,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <mdspan>
+#include <stdfloat>
 
 export module cpu_backend;
 import base;
@@ -22,7 +23,7 @@ export {
                  std::mdspan<const float, std::dims<2>> input, const float* weights, float epsilon);
     void embedding(std::mdspan<float, std::dims<3>> output,
                    std::mdspan<const int8_t, std::dims<5>> packed_embeddings,
-                   std::mdspan<const uint16_t, std::dims<3>> row_scales,
+                   std::mdspan<const std::float16_t, std::dims<3>> row_scales,
                    std::span<const int> tokens, float multiplier);
     // Rotates pairs of query or key channels using each position's sine and cosine values so
     // attention can distinguish token order.

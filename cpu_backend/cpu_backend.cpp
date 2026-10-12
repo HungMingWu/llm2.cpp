@@ -6,12 +6,16 @@ module;
 #include <mdspan>
 #include <ranges>
 #include <simd>
+#include <stdfloat>
 
 module cpu_backend;
 import base;
 
+using f32x16 = std::simd::vec<float, 16>;
 using f32x8 = std::simd::vec<float, 8>;
 using f32x4 = std::simd::vec<float, 4>;
+using f16x16 = std::simd::vec<std::float16_t, 16>;
+using i8x32 = std::simd::vec<std::int8_t, 32>;
 
 // workaround for std::simd::fma
 auto fma(auto a, auto b, auto c) {
@@ -220,8 +224,8 @@ void weighted_value_sum(float* output, const float* probabilities,
 
 void embedding(std::mdspan<float, std::dims<3>> output,
                std::mdspan<const int8_t, std::dims<5>> packed_embeddings,
-               std::mdspan<const uint16_t, std::dims<3>> row_scales, std::span<const int> tokens,
-               float multiplier) {
+               std::mdspan<const std::float16_t, std::dims<3>> row_scales,
+               std::span<const int> tokens, float multiplier) {
     // Each 64-value group has one half-precision scale per row in the block.
 #pragma omp for schedule(static)
     for (auto [output_row, token_id] : std::ranges::views::enumerate(tokens)) {
@@ -230,8 +234,9 @@ void embedding(std::mdspan<float, std::dims<3>> output,
         for (size_t group_index = 0; group_index < packed_embeddings.extent(1); group_index++) {
             // Convert this row's half-precision quantization scale, then apply the caller's
             // multiplier.
-            const float scale =
-                _cvtsh_ss(row_scales[block_index, group_index, row_in_block]) * multiplier;
+            const float scale = _cvtsh_ss(std::bit_cast<uint16_t>(
+                                    row_scales[block_index, group_index, row_in_block])) *
+                                multiplier;
             for (size_t value_index = 0; value_index < output.extent(2); value_index++) {
                 const int chunk_index = value_index / 4;
                 const int value_in_chunk = value_index % 4;

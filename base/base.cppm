@@ -1,12 +1,13 @@
 module;
 #include <cstdint>
+#include <stdfloat>
 
 export module base;
 
 export {
     struct Tensor {
         void* data;
-        uint16_t* scales;
+        std::float16_t* scales;
         int shape[4];
     };
 }
