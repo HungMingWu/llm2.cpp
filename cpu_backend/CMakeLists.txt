@@ -17,7 +17,6 @@ target_compile_features(libcpu_backend PUBLIC cxx_std_26)
 
 target_link_libraries(libcpu_backend
 PUBLIC
-  libbase
   OpenMP::OpenMP_CXX
   m
 )

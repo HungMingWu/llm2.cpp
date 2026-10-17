@@ -267,6 +267,14 @@ void apply_rope(const Tensor* cosines, const Tensor* sines, std::mdspan<float, s
     return apply_rope(cosine, sine, vector, start_pos);
 }
 
+void matmul_int8(std::mdspan<float, std::dims<2>> output,
+                 std::mdspan<const int8_t, std::dims<2>> input_q,
+                 std::mdspan<const float, std::dims<2>> input_scales, const Tensor* weight) {
+    std::mdspan packed_weights((const int8_t*)weight->data, weight->shape[0], weight->shape[1]);
+    std::mdspan weight_scales(weight->scales, weight->shape[0], weight->shape[1]);
+    matmul_int8(output, input_q, input_scales, packed_weights, weight_scales);
+}
+
 // Builds queries, updates the KV cache, and computes causal attention over 512 tokens or the full
 // context while shared layers reuse the latest compatible cache.
 void attention(InferenceState* state, const LayerWeights* layers, int layer, int start_pos,
@@ -288,8 +296,10 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
     // Build the queries for every token in the batch.
     quantize(state->quantized, state->activation_scales, state->hidden, token_count,
              weights->q_proj.shape[1]);
-    matmul_int8(state->auxiliary, state->quantized, state->activation_scales, &weights->q_proj,
-                token_count);
+    matmul_int8(std::mdspan(state->auxiliary, token_count, weights->q_proj.shape[0]),
+                std::mdspan(state->quantized, token_count, weights->q_proj.shape[1]),
+                std::mdspan(state->activation_scales, token_count, weights->q_proj.shape[1] / 64),
+                &weights->q_proj);
     std::mdspan auxiliary(state->auxiliary, token_count * (query_width / head_dim), head_dim);
     rmsnorm(auxiliary, auxiliary, (const float*)weights->q_norm.data, 1e-6f);
     apply_rope(&weights->rope_cos, &weights->rope_sin,
@@ -301,10 +311,16 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
     if (weights->k_proj.data) {
         float* new_keys = &key_cache[start_pos % cache_len, 0];
         float* new_values = &value_cache[start_pos % cache_len, 0];
-        matmul_int8(new_keys, state->quantized, state->activation_scales, &weights->k_proj,
-                    token_count);
-        matmul_int8(new_values, state->quantized, state->activation_scales, &weights->v_proj,
-                    token_count);
+        matmul_int8(
+            std::mdspan(new_keys, token_count, weights->k_proj.shape[0]),
+            std::mdspan(state->quantized, token_count, weights->k_proj.shape[1]),
+            std::mdspan(state->activation_scales, token_count, weights->k_proj.shape[1] / 64),
+            &weights->k_proj);
+        matmul_int8(
+            std::mdspan(new_values, token_count, weights->v_proj.shape[0]),
+            std::mdspan(state->quantized, token_count, weights->v_proj.shape[1]),
+            std::mdspan(state->activation_scales, token_count, weights->v_proj.shape[1] / 64),
+            &weights->v_proj);
         std::mdspan sliding_key_cache = std::submdspan(
             key_cache, std::pair{start_pos % cache_len, start_pos % cache_len + token_count},
             std::full_extent);
@@ -341,8 +357,10 @@ void attention(InferenceState* state, const LayerWeights* layers, int layer, int
     // Merge the heads back to the residual width.
     quantize(state->quantized, state->activation_scales, state->hidden, token_count,
              weights->o_proj.shape[1]);
-    matmul_int8(state->hidden, state->quantized, state->activation_scales, &weights->o_proj,
-                token_count);
+    matmul_int8(std::mdspan(state->hidden, token_count, weights->o_proj.shape[0]),
+                std::mdspan(state->quantized, token_count, weights->o_proj.shape[1]),
+                std::mdspan(state->activation_scales, token_count, weights->o_proj.shape[1] / 64),
+                &weights->o_proj);
 }
 
 void InferenceState::forward(Gemma4* model, std::span<const int> tokens, int start_pos) {
@@ -356,8 +374,13 @@ void InferenceState::forward(Gemma4* model, std::span<const int> tokens, int sta
 
         // Build the token-conditioned input that each transformer layer will receive.
         quantize(quantized, activation_scales, residual, tokens.size(), HIDDEN_SIZE);
-        matmul_int8(per_layer_inputs, quantized, activation_scales,
-                    &model->weights.per_layer_model_projection, tokens.size());
+        matmul_int8(std::mdspan(per_layer_inputs, tokens.size(),
+                                model->weights.per_layer_model_projection.shape[0]),
+                    std::mdspan(quantized, tokens.size(),
+                                model->weights.per_layer_model_projection.shape[1]),
+                    std::mdspan(activation_scales, tokens.size(),
+                                model->weights.per_layer_model_projection.shape[1] / 64),
+                    &model->weights.per_layer_model_projection);
         std::mdspan per_layer_inputs_mdspan(per_layer_inputs, tokens.size() * NUM_LAYERS,
                                             per_layer_width);
         rmsnorm(per_layer_inputs_mdspan, per_layer_inputs_mdspan,
@@ -386,30 +409,50 @@ void InferenceState::forward(Gemma4* model, std::span<const int> tokens, int sta
                     1e-6f);
             quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->gate_proj.shape[1]);
-            matmul_int8(hidden, quantized, activation_scales, &weights->gate_proj, tokens.size());
-            matmul_int8(auxiliary, quantized, activation_scales, &weights->up_proj, tokens.size());
+            matmul_int8(
+                std::mdspan(hidden, tokens.size(), weights->gate_proj.shape[0]),
+                std::mdspan(quantized, tokens.size(), weights->gate_proj.shape[1]),
+                std::mdspan(activation_scales, tokens.size(), weights->gate_proj.shape[1] / 64),
+                &weights->gate_proj);
+            matmul_int8(
+                std::mdspan(auxiliary, tokens.size(), weights->up_proj.shape[0]),
+                std::mdspan(quantized, tokens.size(), weights->up_proj.shape[1]),
+                std::mdspan(activation_scales, tokens.size(), weights->up_proj.shape[1] / 64),
+                &weights->up_proj);
             geglu(std::mdspan(hidden, tokens.size(), weights->gate_proj.shape[0]),
                   std::mdspan(auxiliary, tokens.size(), weights->gate_proj.shape[0]),
                   &model->weights.gelu_table);
             quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->down_proj.shape[1]);
-            matmul_int8(hidden, quantized, activation_scales, &weights->down_proj, tokens.size());
+            matmul_int8(
+                std::mdspan(hidden, tokens.size(), weights->down_proj.shape[0]),
+                std::mdspan(quantized, tokens.size(), weights->down_proj.shape[1]),
+                std::mdspan(activation_scales, tokens.size(), weights->down_proj.shape[1] / 64),
+                &weights->down_proj);
             rmsnorm(hidden_mdspan, hidden_mdspan, (const float*)weights->post_ffn_layernorm.data,
                     1e-6f);
             add_and_scale(residual, hidden, tokens.size() * HIDDEN_SIZE, 1.0f);
 
             // This layer's per-layer embedding row, gated and added with a learned scale.
             quantize(quantized, activation_scales, residual, tokens.size(), HIDDEN_SIZE);
-            matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_input_gate,
-                        tokens.size());
+            matmul_int8(
+                std::mdspan(hidden, tokens.size(), weights->per_layer_input_gate.shape[0]),
+                std::mdspan(quantized, tokens.size(), weights->per_layer_input_gate.shape[1]),
+                std::mdspan(activation_scales, tokens.size(),
+                            weights->per_layer_input_gate.shape[1] / 64),
+                &weights->per_layer_input_gate);
             geglu(std::mdspan(hidden, tokens.size(), per_layer_width),
                   std::mdspan(per_layer_inputs + layer * per_layer_width, tokens.size(),
                               NUM_LAYERS * per_layer_width),
                   &model->weights.gelu_table);
             quantize(quantized, activation_scales, hidden, tokens.size(),
                      weights->per_layer_projection.shape[1]);
-            matmul_int8(hidden, quantized, activation_scales, &weights->per_layer_projection,
-                        tokens.size());
+            matmul_int8(
+                std::mdspan(hidden, tokens.size(), weights->per_layer_projection.shape[0]),
+                std::mdspan(quantized, tokens.size(), weights->per_layer_projection.shape[1]),
+                std::mdspan(activation_scales, tokens.size(),
+                            weights->per_layer_projection.shape[1] / 64),
+                &weights->per_layer_projection);
             rmsnorm(hidden_mdspan, hidden_mdspan,
                     (const float*)weights->post_per_layer_input_norm.data, 1e-6f);
             add_and_scale(residual, hidden, tokens.size() * HIDDEN_SIZE,
@@ -427,8 +470,10 @@ std::span<const float> logits(Gemma4* model, InferenceState* state, size_t token
                 std::mdspan(state->residual + token * HIDDEN_SIZE, 1, HIDDEN_SIZE),
                 (const float*)model->weights.norm.data, 1e-6f);
         quantize(state->quantized, state->activation_scales, state->hidden, 1, HIDDEN_SIZE);
-        matmul_int8(state->hidden, state->quantized, state->activation_scales,
-                    &model->weights.embed, 1);
+        matmul_int8(std::mdspan(state->hidden, 1, model->weights.embed.shape[0]),
+                    std::mdspan(state->quantized, 1, model->weights.embed.shape[1]),
+                    std::mdspan(state->activation_scales, 1, model->weights.embed.shape[1] / 64),
+                    &model->weights.embed);
 #pragma omp for schedule(static)
         for (int i = 0; i < VOCAB_SIZE; i++)
             state->hidden[i] = 30.0f * tanhf(state->hidden[i] / 30.0f);

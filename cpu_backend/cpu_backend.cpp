@@ -9,126 +9,211 @@ module;
 #include <stdfloat>
 
 module cpu_backend;
-import base;
 
 using f32x16 = std::simd::vec<float, 16>;
 using f32x8 = std::simd::vec<float, 8>;
 using f32x4 = std::simd::vec<float, 4>;
+using f16x8 = std::simd::vec<std::float16_t, 8>;
 using f16x16 = std::simd::vec<std::float16_t, 16>;
+using i8x4 = std::simd::vec<std::int8_t, 4>;
 using i8x32 = std::simd::vec<std::int8_t, 32>;
+using i8x64 = std::simd::vec<std::int8_t, 64>;
+using i16x16 = std::simd::vec<std::int16_t, 16>;
+using i32x4 = std::simd::vec<std::int32_t, 4>;
+using i32x8 = std::simd::vec<std::int32_t, 8>;
+using i32x16 = std::simd::vec<std::int32_t, 16>;
+using u8x32 = std::simd::vec<std::uint8_t, 32>;
+using u8x64 = std::simd::vec<std::uint8_t, 64>;
 
 // workaround for std::simd::fma
 auto fma(auto a, auto b, auto c) {
     return a * b + c;
 }
 
+inline i32x16 dpbusd(const i32x16& acc, const u8x64& a, const i8x64& b) {
+    return i32x16([&](auto i) {
+        const std::size_t j = std::size_t(i) * 4;
+
+        std::int32_t dot = std::int32_t(a[j]) * std::int32_t(b[j]) +
+                           std::int32_t(a[j + 1]) * std::int32_t(b[j + 1]) +
+                           std::int32_t(a[j + 2]) * std::int32_t(b[j + 2]) +
+                           std::int32_t(a[j + 3]) * std::int32_t(b[j + 3]);
+
+        std::uint32_t sum =
+            std::bit_cast<std::uint32_t>(std::int32_t(acc[i])) + static_cast<std::uint32_t>(dot);
+
+        return std::bit_cast<std::int32_t>(sum);
+    });
+}
+
+inline i8x32 sign_epi8(const i8x32& a, const i8x32& b) {
+    const i8x32 zero{};
+
+    auto result = std::simd::select(b < zero, -a, a);
+
+    return std::simd::select(b == zero, zero, result);
+}
+
+inline i16x16 maddubs(const u8x32& a, const i8x32& b) {
+    return i16x16([&](auto i) {
+        const std::size_t j = std::size_t(i) * 2;
+
+        std::int32_t sum = std::int32_t(a[j]) * std::int32_t(b[j]) +
+                           std::int32_t(a[j + 1]) * std::int32_t(b[j + 1]);
+
+        // Signed saturation
+        if (sum > 32767)
+            sum = 32767;
+        if (sum < -32768)
+            sum = -32768;
+
+        return static_cast<std::int16_t>(sum);
+    });
+}
+
+inline i32x8 madd_epi16(const i16x16& a, const i16x16& b) {
+    return i32x8([&](auto i) {
+        const std::size_t j = std::size_t(i) * 2;
+
+        const std::int32_t p0 = std::int32_t(a[j]) * std::int32_t(b[j]);
+
+        const std::int32_t p1 = std::int32_t(a[j + 1]) * std::int32_t(b[j + 1]);
+
+        // Match VPMADDWD 32-bit wrapping semantics
+        const std::uint32_t sum = std::uint32_t(p0) + std::uint32_t(p1);
+
+        return std::bit_cast<std::int32_t>(sum);
+    });
+}
+
+// abs_epi8 is very slow
+inline i8x32 abs_epi8(const i8x32& a) {
+    const i8x32 zero{};
+
+    return std::simd::select(a < zero, -a, a);
+}
+
 // Multiplies dynamically quantized activations by packed int8 weights in blocks of 16
 // output rows. VNNI handles eight input rows at once while AVX2 handles four.
-#if defined(__AVX512VNNI__)
-static inline __attribute__((always_inline)) void matmul_block(float* output, const int8_t* input_q,
-                                                               const float* input_scales,
-                                                               const Tensor* weight, size_t rows,
-                                                               size_t output_block) {
-    const size_t block_rows = 16;
-    size_t groups_per_row = (size_t)weight->shape[1] / 64;
-    const int8_t* packed_weights =
-        (const int8_t*)weight->data + output_block * block_rows * weight->shape[1];
-    for (size_t row_start = 0; row_start < rows; row_start += 8) {
-        size_t active_rows = rows - row_start < 8 ? rows - row_start : 8;
-        __m512 result[8] = {0};
+#if 0 // defined(__AVX512VNNI__)
+static inline __attribute__((always_inline)) void
+matmul_block(std::mdspan<float, std::dims<2>, std::layout_stride> output,
+             std::mdspan<const int8_t, std::dims<2>> input_q,
+             std::mdspan<const float, std::dims<2>> input_scales,
+             std::mdspan<const int8_t, std::dims<4>> packed_weights,
+             std::mdspan<const std::float16_t, std::dims<2>> weight_scales) {
+    size_t groups_per_row = packed_weights.extent(0);
+    while (!output.empty()) {
+        size_t active_rows = std::min(size_t(8), output.extent(0));
+        std::array<f32x16, 8> result{};
         for (size_t group = 0; group < groups_per_row; group++) {
-            __m512i dot[8] = {0};
-            __m512i correction = _mm512_setzero_si512();
-            __m512i offset_bytes = _mm512_set1_epi8(
-                -128); // Flip signed activations into the unsigned range required by VNNI.
+            std::array<i32x16, 8> dot{};
+            i32x16 correction{};
+            u8x64 offset_bytes{std::uint8_t{128}};
             for (int chunk = 0; chunk < 16; chunk++) {
-                __m512i weight_values =
-                    _mm512_load_si512((const __m512i*)(packed_weights + group * 1024 + chunk * 64));
+                auto weight_values =
+                    std::simd::unchecked_load<i8x64>(&packed_weights[group, chunk, 0, 0], 64);
+                // correction = dpbusd(correction, offset_bytes, weight_values);
                 correction = _mm512_dpbusd_epi32(correction, offset_bytes, weight_values);
                 for (size_t row = 0; row < active_rows; row++) {
-                    __m512i input_values = _mm512_broadcastd_epi32(_mm_loadu_si32(
-                        input_q + (row_start + row) * weight->shape[1] + group * 64 + chunk * 4));
-                    input_values = _mm512_xor_si512(input_values, offset_bytes);
+                    i8x64 input_values([&](auto lane) {
+                        return input_q[row, group * 64 + chunk * 4 + std::size_t(lane) % 4];
+                    });
+                    input_values = input_values ^ i8x64 {
+                        std::int8_t {
+                            -128
+                        }
+                    };
+                    // dot[row] = dpbusd(dot[row], std::bit_cast<u8x64>(input_values),
+                    // weight_values);
                     dot[row] = _mm512_dpbusd_epi32(dot[row], input_values, weight_values);
                 }
             }
-            __m512 weight_scales = _mm512_cvtph_ps(_mm256_loadu_si256(
-                (const __m256i*)(weight->scales +
-                                 (output_block * groups_per_row + group) * block_rows)));
+            auto group_scales =
+                f32x16{std::simd::unchecked_load<f16x16>(&weight_scales[group, 0], 16)};
             for (size_t row = 0; row < active_rows; row++)
-                result[row] = _mm512_fmadd_ps(
-                    _mm512_cvtepi32_ps(_mm512_sub_epi32(dot[row], correction)),
-                    _mm512_mul_ps(
-                        weight_scales,
-                        _mm512_set1_ps(input_scales[(row_start + row) * groups_per_row + group])),
-                    result[row]);
+                result[row] = fma(f32x16{dot[row] - correction},
+                                  group_scales * f32x16{input_scales[row, group]}, result[row]);
         }
         for (size_t row = 0; row < active_rows; row++)
-            _mm512_storeu_ps(output + (row_start + row) * weight->shape[0] +
-                                 output_block * block_rows,
-                             result[row]);
+            std::simd::unchecked_store(result[row], &output[row, 0], 16);
+        output = std::submdspan(output, std::pair{active_rows, output.extent(0)}, std::full_extent);
+        input_q =
+            std::submdspan(input_q, std::pair{active_rows, input_q.extent(0)}, std::full_extent);
+        input_scales = std::submdspan(input_scales, std::pair{active_rows, input_scales.extent(0)},
+                                      std::full_extent);
     }
 }
 #else
-static inline __attribute__((always_inline)) void matmul_block(float* output, const int8_t* input_q,
-                                                               const float* input_scales,
-                                                               const Tensor* weight, size_t rows,
-                                                               size_t output_block) {
-    const size_t block_rows = 16;
-    size_t groups_per_row = (size_t)weight->shape[1] / 64;
-    const int8_t* packed_weights =
-        (const int8_t*)weight->data + output_block * block_rows * weight->shape[1];
-    for (size_t row_start = 0; row_start < rows; row_start += 4) {
-        size_t active_rows = rows - row_start < 4 ? rows - row_start : 4;
+static inline __attribute__((always_inline)) void
+matmul_block(std::mdspan<float, std::dims<2>, std::layout_stride> output,
+             std::mdspan<const int8_t, std::dims<2>> input_q,
+             std::mdspan<const float, std::dims<2>> input_scales,
+             std::mdspan<const int8_t, std::dims<4>> packed_weights,
+             std::mdspan<const std::float16_t, std::dims<2>> weight_scales) {
+    size_t groups_per_row = packed_weights.extent(0);
+    while (!output.empty()) {
+        size_t active_rows = std::min(size_t(4), output.extent(0));
         for (int half = 0; half < 2; half++) {
-            __m256 result[4] = {0};
+            std::array<f32x8, 4> result{};
             for (size_t group = 0; group < groups_per_row; group++) {
-                __m256i dot[4] = {0};
+                std::array<i32x8, 4> dot{};
                 for (int chunk = 0; chunk < 16; chunk++) {
-                    __m256i weight_values = _mm256_loadu_si256(
-                        (const __m256i*)(packed_weights + group * 1024 + chunk * 64 + half * 32));
-                    __m256i weight_magnitudes = _mm256_abs_epi8(weight_values);
+                    auto weight_values = std::simd::unchecked_load<i8x32>(
+                        &packed_weights[group, chunk, half * 8, 0], 32);
+                    u8x32 weight_magnitudes =
+                        /*_mm256_abs_epi8*/ std::bit_cast<u8x32>(abs_epi8(weight_values));
                     for (size_t row = 0; row < active_rows; row++) {
-                        __m256i input_values = _mm256_broadcastd_epi32(
-                            _mm_loadu_si32(input_q + (row_start + row) * weight->shape[1] +
-                                           group * 64 + chunk * 4));
-                        dot[row] = _mm256_add_epi32(
-                            dot[row],
-                            _mm256_madd_epi16(
-                                _mm256_maddubs_epi16(weight_magnitudes,
-                                                     _mm256_sign_epi8(input_values, weight_values)),
-                                _mm256_set1_epi16(1)));
+                        i8x32 input_values([&](auto lane) {
+                            return input_q[row, group * 64 + chunk * 4 + std::size_t(lane) % 4];
+                        });
+                        dot[row] =
+                            dot[row] +
+                            /*_mm256_madd_epi16*/ madd_epi16(
+                                /*_mm256_maddubs_epi16*/ maddubs(
+                                    weight_magnitudes,
+                                    /*_mm256_sign_epi8*/ sign_epi8(input_values, weight_values)),
+                                i16x16{std::int16_t(1)});
                     }
                 }
-                __m256 weight_scales = _mm256_cvtph_ps(_mm_loadu_si128(
-                    (const __m128i*)(weight->scales +
-                                     (output_block * groups_per_row + group) * block_rows +
-                                     half * 8)));
+                auto group_scales =
+                    f32x8{std::simd::unchecked_load<f16x8>(&weight_scales[group, half * 8], 8)};
                 for (size_t row = 0; row < active_rows; row++)
-                    result[row] = _mm256_fmadd_ps(
-                        _mm256_cvtepi32_ps(dot[row]),
-                        _mm256_mul_ps(
-                            weight_scales,
-                            _mm256_set1_ps(
-                                input_scales[(row_start + row) * groups_per_row + group])),
-                        result[row]);
+                    result[row] = fma(f32x8{dot[row]},
+                                      group_scales * f32x8{input_scales[row, group]}, result[row]);
             }
             for (size_t row = 0; row < active_rows; row++)
-                _mm256_storeu_ps(output + (row_start + row) * weight->shape[0] +
-                                     output_block * block_rows + half * 8,
-                                 result[row]);
+                std::simd::unchecked_store(result[row], &output[row, half * 8], 8);
         }
+        output = std::submdspan(output, std::pair{active_rows, output.extent(0)}, std::full_extent);
+        input_q =
+            std::submdspan(input_q, std::pair{active_rows, input_q.extent(0)}, std::full_extent);
+        input_scales = std::submdspan(input_scales, std::pair{active_rows, input_scales.extent(0)},
+                                      std::full_extent);
     }
 }
 #endif
 
-void matmul_int8(float* output, const int8_t* input_q, const float* input_scales,
-                 const Tensor* weight, size_t rows) {
+void matmul_int8(std::mdspan<float, std::dims<2>> output,
+                 std::mdspan<const int8_t, std::dims<2>> input_q,
+                 std::mdspan<const float, std::dims<2>> input_scales,
+                 std::mdspan<const int8_t, std::dims<2>> packed_weights1,
+                 std::mdspan<const std::float16_t, std::dims<2>> weight_scales1) {
     const size_t block_rows = 16;
+    const size_t groups_per_row = weight_scales1.extent(1) / 64;
+    std::mdspan packed_weights(&packed_weights1[0, 0], packed_weights1.extent(0) / block_rows,
+                               groups_per_row, 16, block_rows, 4);
+    std::mdspan weight_scales(&weight_scales1[0, 0], weight_scales1.extent(0) / block_rows,
+                              groups_per_row, block_rows);
 #pragma omp for schedule(static)
-    for (size_t output_block = 0; output_block < (size_t)weight->shape[0] / block_rows;
-         output_block++)
-        matmul_block(output, input_q, input_scales, weight, rows, output_block);
+    for (size_t output_block = 0; output_block < packed_weights.extent(0); output_block++)
+        matmul_block(
+            std::submdspan(output, std::full_extent,
+                           std::pair{output_block * block_rows, output_block * block_rows + 16}),
+            input_q, input_scales,
+            std::submdspan(packed_weights, output_block, std::full_extent, std::full_extent,
+                           std::full_extent, std::full_extent),
+            std::submdspan(weight_scales, output_block, std::full_extent, std::full_extent));
 }
 
 void rmsnorm(std::mdspan<float, std::dims<2>> output, std::mdspan<const float, std::dims<2>> input,

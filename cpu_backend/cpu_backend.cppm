@@ -5,11 +5,13 @@ module;
 #include <stdfloat>
 
 export module cpu_backend;
-import base;
 
 export {
-    void matmul_int8(float* output, const int8_t* input_q, const float* input_scales,
-                     const Tensor* weight, size_t rows);
+    void matmul_int8(std::mdspan<float, std::dims<2>> output,
+                     std::mdspan<const int8_t, std::dims<2>> input_q,
+                     std::mdspan<const float, std::dims<2>> input_scales,
+                     std::mdspan<const int8_t, std::dims<2>> packed_weights,
+                     std::mdspan<const std::float16_t, std::dims<2>> weight_scales);
     void add_and_scale(float* output, const float* addend, size_t count, float scale);
     void softmax(float* values, int count);
     void attention_scores(float* scores, std::mdspan<const float, std::dims<1>> query,
