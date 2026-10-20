@@ -32,6 +32,9 @@ struct short_name {
     char value;
 };
 
+struct positional {};
+struct negate {};
+
 template <class T> struct parsed_value {
     T value;
     std::size_t consumed;
@@ -109,11 +112,25 @@ template <std::meta::info Member> consteval char get_short_name() {
     return name.empty() ? '\0' : name.front();
 }
 
+consteval bool has_annotation(std::meta::info Member, std::meta::info type) {
+    return !std::meta::annotations_of_with_type(
+        Member,
+        type
+    ).empty();
+}
+
+template <typename T>
+consteval bool has_annotation(std::meta::info Member, const T& val) {
+    return has_annotation(Member, std::meta::type_of(^^val));
+}
+
 template <class Args> Args parse(std::span<char*> argv) {
     Args result{};
+    bool positional_consumed = false;
 
     while (!argv.empty()) {
         std::string_view arg = argv.front();
+        char* current_arg = argv.front();
         argv = argv.subspan(1);
 
         bool matched = false;
@@ -129,6 +146,17 @@ template <class Args> Args parse(std::span<char*> argv) {
 
             using T = std::remove_cvref_t<decltype(field)>;
 
+            constexpr bool is_positional = has_annotation(member, ^^positional);
+            constexpr bool is_negated = has_annotation(member, ^^negate);
+
+            if constexpr (is_positional) {
+                if (!arg.starts_with('-') && !positional_consumed) {
+                    field = parse_value<T>(std::span(&current_arg, 1)).value;
+                    matched = true;
+                    positional_consumed = true;
+                }
+            }
+
             //
             // --foo
             //
@@ -139,7 +167,7 @@ template <class Args> Args parse(std::span<char*> argv) {
                     matched = true;
 
                     if constexpr (std::same_as<T, bool>) {
-                        field = true;
+                        field = is_negated ? !field : true;
                     } else if constexpr (is_optional_v<T>) {
                         using Value = typename T::value_type;
                         auto parsed = parse_value<Value>(argv);
@@ -160,7 +188,7 @@ template <class Args> Args parse(std::span<char*> argv) {
                 matched = true;
 
                 if constexpr (std::same_as<T, bool>) {
-                    field = true;
+                    field = is_negated ? !field : true;
                 } else if constexpr (is_optional_v<T>) {
                     using Value = typename T::value_type;
                     auto parsed = parse_value<Value>(argv);
