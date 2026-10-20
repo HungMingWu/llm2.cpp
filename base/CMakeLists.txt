@@ -9,6 +9,7 @@ PUBLIC
   TYPE CXX_MODULES
   FILES
     base.cppm
+    cli.cppm
     mmio.cppm
 )
 
@@ -29,3 +30,8 @@ target_sources(libbase
 )
 
 target_compile_features(libbase PUBLIC cxx_std_26) 
+
+target_compile_options(libbase
+PUBLIC
+  -freflection
+)
