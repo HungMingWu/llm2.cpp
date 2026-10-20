@@ -16,6 +16,9 @@ mapped_file::mapped_file(std::unique_ptr<mapped_file_impl> impl) noexcept : impl
 
 io::mapped_file::~mapped_file() noexcept = default;
 
+mapped_file::mapped_file(mapped_file&&) noexcept = default;
+mapped_file& mapped_file::operator=(mapped_file&&) noexcept = default;
+
 std::expected<mapped_file, std::error_code> mapped_file::open(const std::filesystem::path& path,
                                                               file_access access) {
     auto result = mapped_file_impl::open(path, access);
@@ -38,6 +41,9 @@ mapped_region::mapped_region(std::unique_ptr<mapped_region_impl> impl) noexcept
 }
 
 mapped_region::~mapped_region() = default;
+
+mapped_region::mapped_region(mapped_region&&) noexcept = default;
+mapped_region& mapped_region::operator=(mapped_region&&) noexcept = default;
 
 std::byte* mapped_region::data() noexcept {
     assert(impl_);
