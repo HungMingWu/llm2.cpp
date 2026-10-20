@@ -1,0 +1,11 @@
+__pycache__/
+venv/
+splitter/
+exported/
+.vscode/
+Models/
+Papaers/
+*.bin
+*.o
+*.obj
+*.exe

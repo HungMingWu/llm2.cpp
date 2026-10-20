@@ -32,8 +32,8 @@ class mapped_region {
     mapped_region(std::unique_ptr<mapped_region_impl>) noexcept;
 
   public:
-    mapped_region(mapped_region&&) noexcept = default;
-    mapped_region& operator=(mapped_region&&) noexcept = default;
+    mapped_region(mapped_region&&) noexcept;
+    mapped_region& operator=(mapped_region&&) noexcept;
 
     mapped_region(mapped_region const&) = delete;
     mapped_region& operator=(mapped_region const&) = delete;
@@ -67,8 +67,8 @@ class mapped_file {
     mapped_file(std::unique_ptr<mapped_file_impl>) noexcept;
 
   public:
-    mapped_file(mapped_file&&) noexcept = default;
-    mapped_file& operator=(mapped_file&&) noexcept = default;
+    mapped_file(mapped_file&&) noexcept;
+    mapped_file& operator=(mapped_file&&) noexcept;
 
     mapped_file(const mapped_file&) = delete;
     mapped_file& operator=(const mapped_file&) = delete;
