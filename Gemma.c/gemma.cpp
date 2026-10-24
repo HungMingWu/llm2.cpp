@@ -131,6 +131,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <print>
 #include <ranges>
 #include <stdexcept>
 #include <span>
@@ -1747,8 +1748,8 @@ check_head(FILE *fp, const char *filename)
   // dtype
   if (memcmp(hdr + 4, DTYPE_MAGIC, 3) != 0)
   {
-    fprintf(
-      stderr, "unsupported dtype '%c%c%c' in model file", hdr[4], hdr[5], hdr[6]
+    std::print(
+      stderr, "unsupported dtype '{}{}{}' in model file", hdr[4], hdr[5], hdr[6]
     );
     return -1;
   }
@@ -6219,7 +6220,7 @@ new_turn(GemmaModel *model, bool enable_mm, ChatContext *ctx)
   {
     case 0:
       // Get a fresh input from stdin
-      printf("\n> ");
+      std::print("\n> ");
 
       if (fgets(ctx->line_buf, ctx->line_cap, stdin) == NULL)
       {
@@ -6521,15 +6522,15 @@ print_model_config(
     vcfg = &enc->config;
   }
 
-  printf("\n========== model configuration ==========\n");
-  printf("  %-*s: %s\n", width, "quant", model->quant ? "true" : "false");
+  std::println("\n========== model configuration ==========");
+  std::println("  {:<{}}: {}", "quant", width, model->quant ? "true" : "false");
   putchar('\n');
   // clang-format off
   
   // Vision encoder architecture (if available and enabled)
   if (use_mm)
   {
-    printf("encoder:\n");
+    std::println("encoder:");
     uint_field encoder_fields[] = {
       {"n_layers"  , vcfg->n_layers  },
       {"image_size", vcfg->image_size},
@@ -6540,13 +6541,13 @@ print_model_config(
       {NULL, 0},
     };
     for (uint_field *field = encoder_fields; field->name != NULL; field++)
-      printf("  %-*s: %d\n", width, field->name, (unsigned int)field->val);
+      std::println("  {:<{}}: {}", field->name, width, field->val);
     
-    printf("  %-*s: %.8f\n", width, "eps", vcfg->eps);
+    std::println("  {:<{}}: {:.8f}", "eps", width, vcfg->eps);
     putchar('\n');
   }
 
-  printf("decoder:\n");
+  std::println("decoder:");
 
   // Integer fields
   uint_field decoder_fields[] = {
@@ -6564,7 +6565,7 @@ print_model_config(
     {NULL, 0},
   };
   for (uint_field *field = decoder_fields; field->name != NULL; field++)
-    printf("  %-*s: %d\n", width, field->name, (unsigned int)field->val);
+    std::println("  {:<{}}: {}", field->name, width, field->val);
 
   // Float fields
   float_field decoder_float_fields[] = {
@@ -6576,13 +6577,13 @@ print_model_config(
     {NULL, 0.0f},
   };
   for (float_field *field = decoder_float_fields; field->name != NULL; field++)
-    printf("  %-*s: %.8f\n", width, field->name, (double)field->val);
+    std::println("  {:<{}}: {:.8f}", field->name, width, field->val);
 
   // Attention layers
-  printf("  %-*s: ", width, "att_layers");
+  std::print("  {:<{}}: ", "att_layers", width);
   for (int i = 0; i < tcfg->n_layers; i++)
   {
-    printf("%d", tcfg->att_layers[i] ? 1 : 0);
+    std::print("{}", tcfg->att_layers[i] ? 1 : 0);
     if ((i + 1) % (width - 1) == 0 && i + 1 < tcfg->n_layers)
     {
       putchar('\n');
@@ -6600,10 +6601,10 @@ print_model_config(
     {NULL, false},
   };
   for (bool_field *field = decoder_bool_fields; field->name != NULL; field++)
-    printf("  %-*s: %s\n", width, field->name, field->val ? "true" : "false");
+    std::println("  {:<{}}: {}", field->name, width, field->val ? "true" : "false");
 
   // Tokenizer
-  printf("\ntokenizer:\n");
+  std::println("\ntokenizer:");
   uint_field tokenizer_fields[] = {
     {"n_merges"  , tok->n_merges  },
     {"max_toklen", tok->max_toklen},
@@ -6617,24 +6618,24 @@ print_model_config(
     {NULL, 0},
   };
   for (uint_field *field = tokenizer_fields; field->name != NULL; field++)
-    printf("  %-*s: %d\n", width, field->name, (unsigned int)field->val);
+    std::println("  {:<{}}: {}", field->name, width, field->val);
 
   // clang-format on
 
   // Parameters
-  printf("\nparameters:\n");
+  std::println("\nparameters:");
 
   size_t enc_params, dec_params = 0;
   if (use_mm)
   {
     enc_params = get_vision_encoder_size(vcfg, tcfg, false) / sizeof(floatx);
-    printf("  %-*s: %zu\n", width, "encoder params", enc_params);
+    std::println("  {:<{}}: {}", "encoder params", width, enc_params);
   }
   dec_params = get_text_decoder_size(tcfg, false) / sizeof(floatx);
-  printf("  %-*s: %zu\n", width, "decoder params", dec_params);
+  std::println("  {:<{}}: {}", "decoder params", width, dec_params);
 
   // Memory footprint
-  printf("\nmemory footprint (estimated):\n");
+  std::println("\nmemory footprint (estimated):");
   double GB = 1024.0 * 1024.0;
 
   // Vision buffer & weights
@@ -6642,8 +6643,8 @@ print_model_config(
   {
     double enc_GB   = get_vision_buffer_size(vcfg, model->quant) / GB;
     double enc_w_GB = get_vision_encoder_size(vcfg, tcfg, model->quant) / GB;
-    printf("  %-*s: %.2f GB\n", width, "encoder buffer", enc_GB);
-    printf("  %-*s: %.2f GB\n", width, "encoder weights", enc_w_GB);
+    std::println("  {:<{}}: {:.2f} GB", "encoder buffer", width, enc_GB);
+    std::println("  {:<{}}: {:.2f} GB", "encoder weights", width, enc_w_GB);
   }
 
   // Text buffer & weights
@@ -6651,14 +6652,14 @@ print_model_config(
     get_text_buffer_size(tcfg, vcfg, seqlen, chunk_size, use_mm, model->quant) /
     GB;
   double dec_w_GB = get_text_decoder_size(tcfg, model->quant) / GB;
-  printf("  %-*s: %.2f GB\n", width, "decoder buffer", dec_GB);
-  printf("  %-*s: %.2f GB\n", width, "decoder weights", dec_w_GB);
+  std::println("  {:<{}}: {:.2f} GB", "decoder buffer", width, dec_GB);
+  std::println("  {:<{}}: {:.2f} GB", "decoder weights", width, dec_w_GB);
 
   // KV cache per tok
   double kvc_t_KB = tcfg->n_layers * 2 * tcfg->n_kv_heads * tcfg->head_dim *
                     sizeof(floatx) / 1024.0;
-  printf("  %-*s: %.2f KB\n", width, "kv cache (tok)", kvc_t_KB);
-  printf("=========================================\n\n");
+  std::println("  {:<{}}: {:.2f} KB", "kv cache (tok)", width, kvc_t_KB);
+  std::println("=========================================\n");
 }
 
 /* */
@@ -6666,7 +6667,7 @@ void
 print_usage(void)
 {
   // clang-format off
-  printf(
+  std::print(
     "usage:\n"
     "  ./gemma <modelfile> [options]\n"
     "\n"
@@ -6900,7 +6901,7 @@ main(int argc, char **argv)
     print_model_config(model.get(), width, (int)seqlen, (int)chunk_size, enable_mm);
 
     // Print command line args
-    printf("\n========= inference arguments ===========\n");
+    std::println("\n========= inference arguments ===========");
 
     uint_field argument_uint_fields[] = {
       {"seqlen"    , seqlen    },
@@ -6910,7 +6911,7 @@ main(int argc, char **argv)
       {NULL, 0},
     };
     for (uint_field *field = argument_uint_fields; field->name != NULL; field++)
-      printf("  %-*s: %d\n", width, field->name, field->val);
+      std::println("  {:<{}}: {}", field->name, width, field->val);
     
     float_field argument_float_fields[] = {
       {"temperature", temperature},
@@ -6919,22 +6920,22 @@ main(int argc, char **argv)
       {NULL, 0.0f},
     };
     for (float_field *field = argument_float_fields; field->name != NULL; field++)
-      printf("  %-*s: %.8f\n", width, field->name, field->val);
+      std::println("  {:<{}}: {:.8f}", field->name, width, field->val);
     
     // Print the first 16 characters of the prompt
-    printf("  %-*s: ", width, "prompt");
+    std::print("  {:<{}}: ", "prompt", width);
     for (int i = 0; i < 16; i++)
     {
       char c = prompt[i];
       switch (c)
       {
         case '\n':
-          printf("\\n");
+          std::print("\\n");
           i++;
           break;
 
         case '\t':
-          printf("\\t");
+          std::print("\\t");
           i++;
           break;
 
@@ -6952,9 +6953,9 @@ main(int argc, char **argv)
       {NULL, false},
     };
     for (bool_field *field = argument_bool_fields; field->name != NULL; field++)
-      printf("  %-*s: %s\n", width, field->name, field->val ? "true" : "false");
+      std::println("  {:<{}}: {}", field->name, width, field->val ? "true" : "false");
     
-    printf("=========================================\n\n");
+    std::println("=========================================\n");
     // clang-format on
   }
 
@@ -6978,28 +6979,28 @@ main(int argc, char **argv)
   if (verbose)
   {
     // Print timing stats
-    printf("\n\n");
+    std::println("\n");
     if (prefill_elapsed > 0.0)
     {
-      printf(
-        "prefilled %d tokens in %.2f seconds (%.2f tok/s)\n", prefill_toks,
+      std::println(
+        "prefilled {} tokens in {:.2f} seconds ({:.2f} tok/s)", prefill_toks,
         prefill_elapsed, prefill_toks / prefill_elapsed
       );
     }
     else
     {
-      printf("prefilled %d tokens instantly\n", prefill_toks);
+      std::println("prefilled {} tokens instantly", prefill_toks);
     }
     if (gen_elapsed > 0.0)
     {
-      printf(
-        "generated %d tokens in %.2f seconds (%.2f tok/s)\n", gen_toks,
+      std::println(
+        "generated {} tokens in {:.2f} seconds ({:.2f} tok/s)", gen_toks,
         gen_elapsed, gen_toks / gen_elapsed
       );
     }
     else
     {
-      printf("generated %d tokens instantly\n", gen_toks);
+      std::println("generated {} tokens instantly", gen_toks);
     }
   }
 
@@ -7008,7 +7009,7 @@ main(int argc, char **argv)
 
   if (g_errmsg[0] != '\0')
   {
-    fprintf(stderr, "error: %s\n", get_error());
+    std::println(stderr, "error: {}", get_error());
   }
 
   return result;
