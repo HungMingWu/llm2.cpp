@@ -2599,21 +2599,14 @@ gemm_fpx_scalar(
 }
 
 // thread_local is critical here since these will be used in openmp threads
-thread_local static float *gemm_fpx_pack_scratch     = NULL;
-thread_local static size_t gemm_fpx_pack_scratch_cap = 0;  // in floats
+thread_local static std::vector<float> gemm_fpx_pack_scratch;
 
 /* */
 static float *
 gemm_fpx_pack_scratch_get(size_t needed_floats)
 {
-  if (needed_floats > gemm_fpx_pack_scratch_cap)
-  {
-    float *tmp = static_cast<float*>(realloc(gemm_fpx_pack_scratch, needed_floats * sizeof(float)));
-    if (tmp == NULL) return NULL;
-    gemm_fpx_pack_scratch     = tmp;
-    gemm_fpx_pack_scratch_cap = needed_floats;
-  }
-  return gemm_fpx_pack_scratch;
+  gemm_fpx_pack_scratch.resize(needed_floats);
+  return gemm_fpx_pack_scratch.data();
 }
 
 /* Performs acc_ext += Ap * Bp over a k-slice of length kc. */
@@ -3066,34 +3059,14 @@ gemm_fpx_nn(
   }
 }
 
-static thread_local int8_t *gemm_i8_pack_scratch     = NULL;
-static thread_local size_t  gemm_i8_pack_scratch_cap = 0;
+static thread_local std::vector<int8_t> gemm_i8_pack_scratch;
 
 /* */
 static int8_t *
 gemm_i8_pack_scratch_get(size_t needed_bytes)
 {
-  if (needed_bytes > gemm_i8_pack_scratch_cap)
-  {
-    int8_t *tmp = static_cast<int8_t*>(realloc(gemm_i8_pack_scratch, needed_bytes));
-    if (tmp == NULL) return NULL;
-    gemm_i8_pack_scratch     = tmp;
-    gemm_i8_pack_scratch_cap = needed_bytes;
-  }
-  return gemm_i8_pack_scratch;
-}
-
-/* */
-static void
-gemm_free_thread_scratch(void)
-{
-  free(gemm_fpx_pack_scratch);
-  gemm_fpx_pack_scratch     = NULL;
-  gemm_fpx_pack_scratch_cap = 0;
-
-  free(gemm_i8_pack_scratch);
-  gemm_i8_pack_scratch     = NULL;
-  gemm_i8_pack_scratch_cap = 0;
+  gemm_i8_pack_scratch.resize(needed_bytes);
+  return gemm_i8_pack_scratch.data();
 }
 
 /* */
@@ -6426,7 +6399,7 @@ chat(
 int
 setup_gemma_model(
   const char *modelfile, bool use_mmap, bool enable_mm, int seqlen, int chunk_size,
-  GemmaModel **model, std::unique_ptr<TextBuffer> *tbuf, std::unique_ptr<VisionBuffer> *vbuf
+  std::unique_ptr<GemmaModel> *model, std::unique_ptr<TextBuffer> *tbuf, std::unique_ptr<VisionBuffer> *vbuf
 )
 {
   *model = nullptr;
@@ -6450,18 +6423,10 @@ setup_gemma_model(
     if (!vision) return 1;
   }
 
-  *model = loaded.release();
+  *model = std::move(loaded);
   *tbuf = std::move(text);
   *vbuf = std::move(vision);
   return 0;
-}
-
-/* */
-void
-cleanup_gemma_model(GemmaModel *model)
-{
-  gemm_free_thread_scratch();
-  delete model;
 }
 
 template <typename F>
@@ -6781,11 +6746,9 @@ main(int argc, char **argv)
   double       gen_elapsed     = 0.0;
   int          gen_toks        = 0;
 
-  GemmaModel   *model = NULL;
+  std::unique_ptr<GemmaModel> model;
   std::unique_ptr<TextBuffer> tbuf;
   std::unique_ptr<VisionBuffer> vbuf;
-
-  ScopeExit resources([&] { cleanup_gemma_model(model); });
 
   // On Windows, get UTF-8 encoded command line arguments
   char **utf8_argv = get_utf8_argv(&argc);
@@ -6934,7 +6897,7 @@ main(int argc, char **argv)
 
     // clang-format off
     const int width = 20;
-    print_model_config(model, width, (int)seqlen, (int)chunk_size, enable_mm);
+    print_model_config(model.get(), width, (int)seqlen, (int)chunk_size, enable_mm);
 
     // Print command line args
     printf("\n========= inference arguments ===========\n");
@@ -6998,7 +6961,7 @@ main(int argc, char **argv)
   if (chatmode)
   {
     chat(
-      model, tbuf.get(), vbuf.get(), (int)seqlen, (int)chunk_size, temperature, (int)topk,
+      model.get(), tbuf.get(), vbuf.get(), (int)seqlen, (int)chunk_size, temperature, (int)topk,
       topp, rpen, enable_mm, &prefill_elapsed, &prefill_toks, &gen_elapsed,
       &gen_toks
     );
@@ -7006,7 +6969,7 @@ main(int argc, char **argv)
   else
   {
     generate(
-      model, tbuf.get(), vbuf.get(), prompt, (int)seqlen, (int)chunk_size, temperature,
+      model.get(), tbuf.get(), vbuf.get(), prompt, (int)seqlen, (int)chunk_size, temperature,
       (int)topk, topp, rpen, enable_mm, &prefill_elapsed, &prefill_toks,
       &gen_elapsed, &gen_toks
     );
