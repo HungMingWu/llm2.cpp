@@ -6154,7 +6154,7 @@ generate_inject_callback(
 }
 
 /* */
-int
+void
 generate(
   // Input parameters
   GemmaModel   *model,
@@ -6193,8 +6193,6 @@ generate(
     enable_mm, &ctx, generate_inject_callback, prefill_elapsed, prefill_toks,
     gen_elapsed, gen_toks
   );
-
-  return 0;
 }
 
 /* Build the Gemma chat template */
@@ -6345,7 +6343,7 @@ chat_inject_callback(int token, GemmaModel *model, bool enable_mm, void *ctx)
 }
 
 /* */
-int
+void
 chat(
   // Input parameters
   GemmaModel   *model,
@@ -6392,8 +6390,6 @@ chat(
     enable_mm, &ctx, chat_inject_callback, prefill_elapsed, prefill_toks,
     gen_elapsed, gen_toks
   );
-
-  return 1;
 }
 
 /* */
