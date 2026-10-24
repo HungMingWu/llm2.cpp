@@ -1100,26 +1100,20 @@ qtensor_size(int m, int n, bool quant)
 }
 
 // Linear layer weights: either plain floatx or int8 + per-channel scales
-static std::unique_ptr<QTensor>
-read_qtensor(FILE *fp, int m, int n, bool quant)
+static void
+read_qtensor(QTensor *w, FILE *fp, int m, int n, bool quant)
 {
-  auto w = std::make_unique<QTensor>();
-
   if (!quant)
   {
     w->quant = false;
-    if (!read_tensor_ckd(w->fpx_data, w->fpx, (size_t)m * (size_t)n, fp))
-      return nullptr;
+    read_tensor_ckd(w->fpx_data, w->fpx, (size_t)m * (size_t)n, fp);
   }
   else
   {
     w->quant = true;
-    if (!read_tensor_ckd(w->q_data, w->i8.q, (size_t)m * (size_t)n, fp) ||
-        !read_tensor_ckd(w->scales_data, w->i8.scales, (size_t)n, fp))
-      return nullptr;
+    read_tensor_ckd(w->q_data, w->i8.q, (size_t)m * (size_t)n, fp);
+    read_tensor_ckd(w->scales_data, w->i8.scales, (size_t)n, fp);
   }
-
-  return w;
 }
 
 /* */
@@ -1148,15 +1142,15 @@ struct TextDecoderLayer
   // Attention weights
   // 2D weights are stored transposed for better GEMV cache use
 
-  std::unique_ptr<QTensor> wq;  // (embed_dim, n_heads * head_dim).T
-  std::unique_ptr<QTensor> wk;  // (embed_dim, n_kv_heads * head_dim).T
-  std::unique_ptr<QTensor> wv;  // (embed_dim, n_kv_heads * head_dim).T
-  std::unique_ptr<QTensor> wo;  // (n_heads * head_dim, embed_dim).T
+  QTensor wq;  // (embed_dim, n_heads * head_dim).T
+  QTensor wk;  // (embed_dim, n_kv_heads * head_dim).T
+  QTensor wv;  // (embed_dim, n_kv_heads * head_dim).T
+  QTensor wo;  // (n_heads * head_dim, embed_dim).T
 
   // Feedforward weights
-  std::unique_ptr<QTensor> w1;  // (embed_dim, mlp_dim).T
-  std::unique_ptr<QTensor> w2;  // (embed_dim, mlp_dim).T
-  std::unique_ptr<QTensor> w3;  // (mlp_dim, embed_dim).T
+  QTensor w1;  // (embed_dim, mlp_dim).T
+  QTensor w2;  // (embed_dim, mlp_dim).T
+  QTensor w3;  // (mlp_dim, embed_dim).T
 
   // RMSNorm weights (Gemma adds 1.0 to the weight)
   floatx *nq;  // (head_dim,)
@@ -1179,18 +1173,18 @@ struct TextDecoderLayer
 struct VisionEncoderLayer
 {
   // ViT attention weights
-  std::unique_ptr<QTensor> wq;  // (hidden_dim, hidden_dim).T
-  std::unique_ptr<QTensor> wk;  // (hidden_dim, hidden_dim).T
-  std::unique_ptr<QTensor> wv;  // (hidden_dim, hidden_dim).T
-  std::unique_ptr<QTensor> wo;  // (hidden_dim, hidden_dim).T
+  QTensor wq;  // (hidden_dim, hidden_dim).T
+  QTensor wk;  // (hidden_dim, hidden_dim).T
+  QTensor wv;  // (hidden_dim, hidden_dim).T
+  QTensor wo;  // (hidden_dim, hidden_dim).T
   floatx  *bq;  // (hidden_dim,)
   floatx  *bk;  // (hidden_dim,)
   floatx  *bv;  // (hidden_dim,)
   floatx  *bo;  // (hidden_dim,)
 
   // ViT feedforward weights
-  std::unique_ptr<QTensor> w1;  // (hidden_dim, mlp_dim).T
-  std::unique_ptr<QTensor> w2;  // (hidden_dim, mlp_dim).T
+  QTensor w1;  // (hidden_dim, mlp_dim).T
+  QTensor w2;  // (hidden_dim, mlp_dim).T
   floatx  *b1;  // (mlp_dim,)
   floatx  *b2;  // (mlp_dim,)
 
@@ -1218,7 +1212,7 @@ struct TextDecoder
 {
   TextConfig config;
   // (vocab_size, embed_dim), shared with lm_head (tied weights)
-  std::unique_ptr<QTensor> embedding;
+  QTensor embedding;
   std::vector<TextDecoderLayer> layers;
   floatx            *final_norm;  // (embed_dim,)
 
@@ -1299,22 +1293,17 @@ read_text_decoder(FILE *fp, TextConfig *tcfg, bool quant)
    * embedding table, but transposed. So it becomes per-channel quantization in
    * the final lm_head. */
 
-  dec->embedding = read_qtensor(fp, embed_dim, vocab_size, quant);
-  if (!dec->embedding)
-    return nullptr;
+  read_qtensor(&dec->embedding, fp, embed_dim, vocab_size, quant);
   dec->layers.resize(tcfg->n_layers);
 
   // Read all the layers
   for (auto &layer : dec->layers)
   {
-
-    if (
-      // Attention weights
-      !(layer.wq = read_qtensor(fp, embed_dim, q_size, quant)) ||
-      !(layer.wk = read_qtensor(fp, embed_dim, kv_size, quant)) ||
-      !(layer.wv = read_qtensor(fp, embed_dim, kv_size, quant)) ||
-      !(layer.wo = read_qtensor(fp, q_size, embed_dim, quant)))
-      return nullptr;
+    // Attention weights
+    read_qtensor(&layer.wq, fp, embed_dim, q_size, quant);
+    read_qtensor(&layer.wk, fp, embed_dim, kv_size, quant);
+    read_qtensor(&layer.wv, fp, embed_dim, kv_size, quant);
+    read_qtensor(&layer.wo, fp, q_size, embed_dim, quant);
 
     if (tcfg->qk_norm)
     {
@@ -1329,11 +1318,11 @@ read_text_decoder(FILE *fp, TextConfig *tcfg, bool quant)
       layer.nk = NULL;
     }
 
+    // Feedforward weights
+    read_qtensor(&layer.w1, fp, embed_dim, mlp_dim, quant);
+    read_qtensor(&layer.w2, fp, embed_dim, mlp_dim, quant);
+    read_qtensor(&layer.w3, fp, mlp_dim, embed_dim, quant);
     if (
-      // Feedforward weights
-      !(layer.w1 = read_qtensor(fp, embed_dim, mlp_dim, quant)) ||
-      !(layer.w2 = read_qtensor(fp, embed_dim, mlp_dim, quant)) ||
-      !(layer.w3 = read_qtensor(fp, mlp_dim, embed_dim, quant)) ||
       // RMSNorm weights
       !read_tensor_ckd(layer.n1_data, layer.n1, embed_dim, fp) ||
       !read_tensor_ckd(layer.n2_data, layer.n2, embed_dim, fp))
@@ -1380,8 +1369,7 @@ mmap_text_decoder(void *data, TextConfig *tcfg, size_t *offset, bool quant)
   dec->config = *tcfg;
 
   // Embedding: linear (embed_dim -> vocab_size)
-  dec->embedding = std::make_unique<QTensor>();
-  mmap_qtensor(dec->embedding.get(), base, offset, embed_dim, vocab_size, quant);
+  mmap_qtensor(&dec->embedding, base, offset, embed_dim, vocab_size, quant);
 
   // Layers array
   dec->layers.resize(tcfg->n_layers);
@@ -1390,17 +1378,10 @@ mmap_text_decoder(void *data, TextConfig *tcfg, size_t *offset, bool quant)
   {
 
     // Attention weights
-    layer.wq = std::make_unique<QTensor>();
-    mmap_qtensor(layer.wq.get(), base, offset, embed_dim, q_size, quant);
-
-    layer.wk = std::make_unique<QTensor>();
-    mmap_qtensor(layer.wk.get(), base, offset, embed_dim, kv_size, quant);
-
-    layer.wv = std::make_unique<QTensor>();
-    mmap_qtensor(layer.wv.get(), base, offset, embed_dim, kv_size, quant);
-
-    layer.wo = std::make_unique<QTensor>();
-    mmap_qtensor(layer.wo.get(), base, offset, q_size, embed_dim, quant);
+    mmap_qtensor(&layer.wq, base, offset, embed_dim, q_size, quant);
+    mmap_qtensor(&layer.wk, base, offset, embed_dim, kv_size, quant);
+    mmap_qtensor(&layer.wv, base, offset, embed_dim, kv_size, quant);
+    mmap_qtensor(&layer.wo, base, offset, q_size, embed_dim, quant);
 
     // QK normalization (optional)
     if (tcfg->qk_norm)
@@ -1417,14 +1398,9 @@ mmap_text_decoder(void *data, TextConfig *tcfg, size_t *offset, bool quant)
     }
 
     // Feedforward weights
-    layer.w1 = std::make_unique<QTensor>();;
-    mmap_qtensor(layer.w1.get(), base, offset, embed_dim, mlp_dim, quant);
-
-    layer.w2 = std::make_unique<QTensor>();;
-    mmap_qtensor(layer.w2.get(), base, offset, embed_dim, mlp_dim, quant);
-
-    layer.w3 = std::make_unique<QTensor>();;
-    mmap_qtensor(layer.w3.get(), base, offset, mlp_dim, embed_dim, quant);
+    mmap_qtensor(&layer.w1, base, offset, embed_dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w2, base, offset, embed_dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w3, base, offset, mlp_dim, embed_dim, quant);
 
     // RMSNorm weights
     layer.n1 = (floatx *)(base + *offset);
@@ -1470,14 +1446,14 @@ struct VisionEncoder
 
   floatx  *patch_emb;      // (hidden_dim, 3, patch_size, patch_size)
   floatx  *patch_emb_b;    // (hidden_dim,)
-  std::unique_ptr<QTensor> pos_embedding;  // ((image_size / patch_size)^2, hidden_dim)
+  QTensor pos_embedding;  // ((image_size / patch_size)^2, hidden_dim)
 
   std::vector<VisionEncoderLayer> layers;
 
   floatx  *post_norm;    // (hidden_dim,)
   floatx  *post_norm_b;  // (hidden_dim,)
   floatx  *norm;         // (hidden_dim,)
-  std::unique_ptr<QTensor> proj;         // (hidden_dim, embed_dim).T
+  QTensor proj;         // (hidden_dim, embed_dim).T
 
   // Storage is empty when the corresponding pointer borrows mmap memory.
   std::vector<floatx> patch_emb_data;
@@ -1568,25 +1544,26 @@ read_vision_encoder(FILE *fp, TextConfig *tcfg, VisionConfig *vcfg, bool quant)
   n_patches *= n_patches;
 
   if (!read_tensor_ckd(enc->patch_emb_data, enc->patch_emb, (size_t)embed_dim * 3 * P * P, fp) ||
-      !read_tensor_ckd(enc->patch_emb_b_data, enc->patch_emb_b, (size_t)embed_dim, fp) ||
-      // Same as here, the real shape is (n_patches, embed_dim)
-      !(enc->pos_embedding = read_qtensor(fp, embed_dim, n_patches, quant)))
+      !read_tensor_ckd(enc->patch_emb_b_data, enc->patch_emb_b, (size_t)embed_dim, fp))
     return nullptr;
+  read_qtensor(&enc->pos_embedding, fp, embed_dim, n_patches, quant);
   enc->layers.resize(vcfg->n_layers);
 
   // Read all the layers of ViT
   for (auto &layer : enc->layers)
   {
-
+    // Attention weights
+    read_qtensor(&layer.wq, fp, embed_dim, embed_dim, quant);
+    read_qtensor(&layer.wk, fp, embed_dim, embed_dim, quant);
+    read_qtensor(&layer.wv, fp, embed_dim, embed_dim, quant);
+    read_qtensor(&layer.wo, fp, embed_dim, embed_dim, quant);
+    // Feedforward weights
+    read_qtensor(&layer.w1, fp, embed_dim, mlp_dim, quant);
+    read_qtensor(&layer.w2, fp, mlp_dim, embed_dim, quant);
     if (
       // First LayerNorm
       !read_tensor_ckd(layer.n1_data, layer.n1, (size_t)embed_dim, fp) ||
       !read_tensor_ckd(layer.n1_b_data, layer.n1_b, (size_t)embed_dim, fp) ||
-      // Attention weights
-      !(layer.wq = read_qtensor(fp, embed_dim, embed_dim, quant)) ||
-      !(layer.wk = read_qtensor(fp, embed_dim, embed_dim, quant)) ||
-      !(layer.wv = read_qtensor(fp, embed_dim, embed_dim, quant)) ||
-      !(layer.wo = read_qtensor(fp, embed_dim, embed_dim, quant)) ||
       // Attention biases
       !read_tensor_ckd(layer.bq_data, layer.bq, (size_t)embed_dim, fp) ||
       !read_tensor_ckd(layer.bk_data, layer.bk, (size_t)embed_dim, fp) ||
@@ -1595,24 +1572,20 @@ read_vision_encoder(FILE *fp, TextConfig *tcfg, VisionConfig *vcfg, bool quant)
       // Second LayerNorm
       !read_tensor_ckd(layer.n2_data, layer.n2, (size_t)embed_dim, fp) ||
       !read_tensor_ckd(layer.n2_b_data, layer.n2_b, (size_t)embed_dim, fp) ||
-      // Feedforward weights
-      !(layer.w1 = read_qtensor(fp, embed_dim, mlp_dim, quant)) ||
-      !(layer.w2 = read_qtensor(fp, mlp_dim, embed_dim, quant)) ||
       // Feedforward biases
       !read_tensor_ckd(layer.b1_data, layer.b1, (size_t)mlp_dim, fp) ||
       !read_tensor_ckd(layer.b2_data, layer.b2, (size_t)embed_dim, fp))
       return nullptr;
-
   }
 
+  // Final projection
+  read_qtensor(&enc->proj, fp, embed_dim, tcfg->embed_dim, quant);
   if (
     // Post layernorm
     !read_tensor_ckd(enc->post_norm_data, enc->post_norm, (size_t)embed_dim, fp) ||
     !read_tensor_ckd(enc->post_norm_b_data, enc->post_norm_b, (size_t)embed_dim, fp) ||
     // Soft embedding RMSNorm
-    !read_tensor_ckd(enc->norm_data, enc->norm, (size_t)embed_dim, fp) ||
-    // Final projection
-    !(enc->proj = read_qtensor(fp, embed_dim, tcfg->embed_dim, quant)))
+    !read_tensor_ckd(enc->norm_data, enc->norm, (size_t)embed_dim, fp))
     return nullptr;
 
   return enc.release();
@@ -1644,8 +1617,7 @@ mmap_vision_encoder(
   *offset += (size_t)embed_dim * sizeof(floatx);
 
   // pos_embedding: linear (embed_dim -> n_patches)
-  enc->pos_embedding = std::make_unique<QTensor>();
-  mmap_qtensor(enc->pos_embedding.get(), base, offset, embed_dim, n_patches, quant);
+  mmap_qtensor(&enc->pos_embedding, base, offset, embed_dim, n_patches, quant);
 
   // layers array
   enc->layers.resize(vcfg->n_layers);
@@ -1660,17 +1632,10 @@ mmap_vision_encoder(
     *offset += (size_t)embed_dim * sizeof(floatx);
 
     // attention weights: wq, wk, wv, wo (linear embed_dim -> embed_dim)
-    layer.wq = std::make_unique<QTensor>();;
-    mmap_qtensor(layer.wq.get(), base, offset, embed_dim, embed_dim, quant);
-
-    layer.wk = std::make_unique<QTensor>();;
-    mmap_qtensor(layer.wk.get(), base, offset, embed_dim, embed_dim, quant);
-
-    layer.wv = std::make_unique<QTensor>();
-    mmap_qtensor(layer.wv.get(), base, offset, embed_dim, embed_dim, quant);
-
-    layer.wo = std::make_unique<QTensor>();
-    mmap_qtensor(layer.wo.get(), base, offset, embed_dim, embed_dim, quant);
+    mmap_qtensor(&layer.wq, base, offset, embed_dim, embed_dim, quant);
+    mmap_qtensor(&layer.wk, base, offset, embed_dim, embed_dim, quant);
+    mmap_qtensor(&layer.wv, base, offset, embed_dim, embed_dim, quant);
+    mmap_qtensor(&layer.wo, base, offset, embed_dim, embed_dim, quant);
 
     // attention biases: bq, bk, bv, bo
     layer.bq = (floatx *)(base + *offset);
@@ -1689,11 +1654,8 @@ mmap_vision_encoder(
     *offset += (size_t)embed_dim * sizeof(floatx);
 
     // feedforward weights: w1 (embed_dim -> mlp_dim), w2 (mlp_dim -> embed_dim)
-    layer.w1 = std::make_unique<QTensor>();
-    mmap_qtensor(layer.w1.get(), base, offset, embed_dim, mlp_dim, quant);
-
-    layer.w2 = std::make_unique<QTensor>();;
-    mmap_qtensor(layer.w2.get(), base, offset, mlp_dim, embed_dim, quant);
+    mmap_qtensor(&layer.w1, base, offset, embed_dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w2, base, offset, mlp_dim, embed_dim, quant);
 
     // feedforward biases: b1 (mlp_dim), b2 (embed_dim)
     layer.b1 = (floatx *)(base + *offset);
@@ -1714,8 +1676,7 @@ mmap_vision_encoder(
   *offset += (size_t)embed_dim * sizeof(floatx);
 
   // proj: linear (embed_dim -> embed_dim)
-  enc->proj = std::make_unique<QTensor>();
-  mmap_qtensor(enc->proj.get(), base, offset, embed_dim, tcfg->embed_dim, quant);
+  mmap_qtensor(&enc->proj, base, offset, embed_dim, tcfg->embed_dim, quant);
 
   return enc.release();
 
@@ -3705,7 +3666,7 @@ forward_vision(
   {
     for (int d = 0; d < n_patches * embed_dim; d++)
     {
-      vbuf->x.data()[d] = clamp_fpx(vbuf->x.data()[d] + enc->pos_embedding->fpx[d]);
+      vbuf->x.data()[d] = clamp_fpx(vbuf->x.data()[d] + enc->pos_embedding.fpx[d]);
     }
   }
   else
@@ -3714,8 +3675,8 @@ forward_vision(
     for (int i = 0; i < n_patches; i++)
       for (int j = 0; j < embed_dim; j++)
       {
-        float scale = (float)enc->pos_embedding->i8.scales[i];
-        float val = (float)enc->pos_embedding->i8.q[i * embed_dim + j] * scale;
+        float scale = (float)enc->pos_embedding.i8.scales[i];
+        float val = (float)enc->pos_embedding.i8.q[i * embed_dim + j] * scale;
         vbuf->x.data()[i * embed_dim + j] =
           clamp_fpx(vbuf->x.data()[i * embed_dim + j] + (floatx)val);
       }
@@ -3742,15 +3703,15 @@ forward_vision(
     if (!quant)
     {
       if (gemm_fpx(
-            vbuf->xq.data(), 0, layer.wq->fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
+            vbuf->xq.data(), 0, layer.wq.fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
             embed_dim, true
           ) == 1 ||
           gemm_fpx(
-            vbuf->xk.data(), 0, layer.wk->fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
+            vbuf->xk.data(), 0, layer.wk.fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
             embed_dim, true
           ) == 1 ||
           gemm_fpx(
-            vbuf->xv.data(), 0, layer.wv->fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
+            vbuf->xv.data(), 0, layer.wv.fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
             embed_dim, true
           ) == 1)
         return 1;
@@ -3761,15 +3722,15 @@ forward_vision(
         vbuf->x_i8.data(), vbuf->x_scales.data(), vbuf->x.data(), 0, n_patches, embed_dim, true
       );
       if (gemm_int8(
-            vbuf->xq.data(), 0, layer.wq->i8.q, 0, layer.wq->i8.scales, vbuf->x_i8.data(),
+            vbuf->xq.data(), 0, layer.wq.i8.q, 0, layer.wq.i8.scales, vbuf->x_i8.data(),
             0, vbuf->x_scales.data(), n_patches, embed_dim, embed_dim, true
           ) == 1 ||
           gemm_int8(
-            vbuf->xk.data(), 0, layer.wk->i8.q, 0, layer.wk->i8.scales, vbuf->x_i8.data(),
+            vbuf->xk.data(), 0, layer.wk.i8.q, 0, layer.wk.i8.scales, vbuf->x_i8.data(),
             0, vbuf->x_scales.data(), n_patches, embed_dim, embed_dim, true
           ) == 1 ||
           gemm_int8(
-            vbuf->xv.data(), 0, layer.wv->i8.q, 0, layer.wv->i8.scales, vbuf->x_i8.data(),
+            vbuf->xv.data(), 0, layer.wv.i8.q, 0, layer.wv.i8.scales, vbuf->x_i8.data(),
             0, vbuf->x_scales.data(), n_patches, embed_dim, embed_dim, true
           ) == 1)
         return 1;
@@ -3834,7 +3795,7 @@ forward_vision(
     if (!quant)
     {
       if (gemm_fpx(
-            vbuf->x.data(), 0, layer.wo->fpx, 0, vbuf->att_out.data(), 0, n_patches,
+            vbuf->x.data(), 0, layer.wo.fpx, 0, vbuf->att_out.data(), 0, n_patches,
             embed_dim, embed_dim, true
           ) == 1)
         return 1;
@@ -3845,7 +3806,7 @@ forward_vision(
         vbuf->x_i8.data(), vbuf->x_scales.data(), vbuf->att_out.data(), 0, n_patches, embed_dim, true
       );
       if (gemm_int8(
-            vbuf->x.data(), 0, layer.wo->i8.q, 0, layer.wo->i8.scales, vbuf->x_i8.data(), 0,
+            vbuf->x.data(), 0, layer.wo.i8.q, 0, layer.wo.i8.scales, vbuf->x_i8.data(), 0,
             vbuf->x_scales.data(), n_patches, embed_dim, embed_dim, true
           ) == 1)
         return 1;
@@ -3881,7 +3842,7 @@ forward_vision(
     if (!quant)
     {
       if (gemm_fpx(
-            vbuf->mlp_hidden.data(), 0, layer.w1->fpx, 0, vbuf->x.data(), 0, n_patches,
+            vbuf->mlp_hidden.data(), 0, layer.w1.fpx, 0, vbuf->x.data(), 0, n_patches,
             mlp_dim, embed_dim, true
           ) == 1)
         return 1;
@@ -3892,7 +3853,7 @@ forward_vision(
         vbuf->x_i8.data(), vbuf->x_scales.data(), vbuf->x.data(), 0, n_patches, embed_dim, true
       );
       if (gemm_int8(
-            vbuf->mlp_hidden.data(), 0, layer.w1->i8.q, 0, layer.w1->i8.scales,
+            vbuf->mlp_hidden.data(), 0, layer.w1.i8.q, 0, layer.w1.i8.scales,
             vbuf->x_i8.data(), 0, vbuf->x_scales.data(), n_patches, mlp_dim, embed_dim, true
           ) == 1)
         return 1;
@@ -3917,7 +3878,7 @@ forward_vision(
     if (!quant)
     {
       if (gemm_fpx(
-            vbuf->x.data(), 0, layer.w2->fpx, 0, vbuf->mlp_hidden.data(), 0, n_patches,
+            vbuf->x.data(), 0, layer.w2.fpx, 0, vbuf->mlp_hidden.data(), 0, n_patches,
             embed_dim, mlp_dim, true
           ) == 1)
         return 1;
@@ -3929,7 +3890,7 @@ forward_vision(
         true
       );
       if (gemm_int8(
-            vbuf->x.data(), 0, layer.w2->i8.q, 0, layer.w2->i8.scales, vbuf->mlp_i8.data(),
+            vbuf->x.data(), 0, layer.w2.i8.q, 0, layer.w2.i8.scales, vbuf->mlp_i8.data(),
             0, vbuf->mlp_scales.data(), n_patches, embed_dim, mlp_dim, true
           ) == 1)
         return 1;
@@ -4009,7 +3970,7 @@ forward_vision(
   if (!quant)
   {
     if (gemm_fpx(
-          tbuf->x.data(), 0, enc->proj->fpx, 0, vbuf->x.data(), 0, image_toks,
+          tbuf->x.data(), 0, enc->proj.fpx, 0, vbuf->x.data(), 0, image_toks,
           tcfg->embed_dim, embed_dim, true
         ) == 1)
       return 1;
@@ -4020,7 +3981,7 @@ forward_vision(
       vbuf->x_i8.data(), vbuf->x_scales.data(), vbuf->x.data(), 0, image_toks, embed_dim, true
     );
     if (gemm_int8(
-          tbuf->x.data(), 0, enc->proj->i8.q, 0, enc->proj->i8.scales, vbuf->x_i8.data(), 0,
+          tbuf->x.data(), 0, enc->proj.i8.q, 0, enc->proj.i8.scales, vbuf->x_i8.data(), 0,
           vbuf->x_scales.data(), image_toks, tcfg->embed_dim, embed_dim, true
         ) == 1)
       return 1;
@@ -4082,25 +4043,25 @@ forward_text_decode(
     if (!quant)
     {
       gemv_fpx(
-        tbuf->xq.data(), layer.wq->fpx, tbuf->x.data(), q_size, embed_dim, true
+        tbuf->xq.data(), layer.wq.fpx, tbuf->x.data(), q_size, embed_dim, true
       );  // (n_heads, head_dim)
       // (n_kv_heads, head_dim)
-      gemv_fpx(tbuf->xk.data(), layer.wk->fpx, tbuf->x.data(), kv_size, embed_dim, true);
-      gemv_fpx(tbuf->xv.data(), layer.wv->fpx, tbuf->x.data(), kv_size, embed_dim, true);
+      gemv_fpx(tbuf->xk.data(), layer.wk.fpx, tbuf->x.data(), kv_size, embed_dim, true);
+      gemv_fpx(tbuf->xv.data(), layer.wv.fpx, tbuf->x.data(), kv_size, embed_dim, true);
     }
     else
     {
       floatx x_scale = quantize_act(tbuf->x_i8.data(), tbuf->x.data(), embed_dim);
       gemv_int8(
-        tbuf->xq.data(), layer.wq->i8.q, layer.wq->i8.scales, tbuf->x_i8.data(), x_scale,
+        tbuf->xq.data(), layer.wq.i8.q, layer.wq.i8.scales, tbuf->x_i8.data(), x_scale,
         q_size, embed_dim, true
       );
       gemv_int8(
-        tbuf->xk.data(), layer.wk->i8.q, layer.wk->i8.scales, tbuf->x_i8.data(), x_scale,
+        tbuf->xk.data(), layer.wk.i8.q, layer.wk.i8.scales, tbuf->x_i8.data(), x_scale,
         kv_size, embed_dim, true
       );
       gemv_int8(
-        tbuf->xv.data(), layer.wv->i8.q, layer.wv->i8.scales, tbuf->x_i8.data(), x_scale,
+        tbuf->xv.data(), layer.wv.i8.q, layer.wv.i8.scales, tbuf->x_i8.data(), x_scale,
         kv_size, embed_dim, true
       );
     }
@@ -4227,13 +4188,13 @@ forward_text_decode(
     // x (embed_dim,) = xo (head_dim,) @ wo.T (head_dim, embed_dim)
     if (!quant)
     {
-      gemv_fpx(tbuf->x.data(), layer.wo->fpx, tbuf->xo.data(), embed_dim, q_size, true);
+      gemv_fpx(tbuf->x.data(), layer.wo.fpx, tbuf->xo.data(), embed_dim, q_size, true);
     }
     else
     {
       floatx xo_scale = quantize_act(tbuf->xo_i8.data(), tbuf->xo.data(), q_size);
       gemv_int8(
-        tbuf->x.data(), layer.wo->i8.q, layer.wo->i8.scales, tbuf->xo_i8.data(), xo_scale,
+        tbuf->x.data(), layer.wo.i8.q, layer.wo.i8.scales, tbuf->xo_i8.data(), xo_scale,
         embed_dim, q_size, true
       );
     }
@@ -4274,21 +4235,21 @@ forward_text_decode(
     if (!quant)
     {
       gemv_fpx(
-        tbuf->xu.data(), layer.w1->fpx, tbuf->x.data(), tcfg->mlp_dim, embed_dim, true
+        tbuf->xu.data(), layer.w1.fpx, tbuf->x.data(), tcfg->mlp_dim, embed_dim, true
       );
       gemv_fpx(
-        tbuf->xg.data(), layer.w2->fpx, tbuf->x.data(), tcfg->mlp_dim, embed_dim, true
+        tbuf->xg.data(), layer.w2.fpx, tbuf->x.data(), tcfg->mlp_dim, embed_dim, true
       );
     }
     else
     {
       floatx x_scale = quantize_act(tbuf->x_i8.data(), tbuf->x.data(), embed_dim);
       gemv_int8(
-        tbuf->xg.data(), layer.w2->i8.q, layer.w2->i8.scales, tbuf->x_i8.data(), x_scale,
+        tbuf->xg.data(), layer.w2.i8.q, layer.w2.i8.scales, tbuf->x_i8.data(), x_scale,
         tcfg->mlp_dim, embed_dim, true
       );
       gemv_int8(
-        tbuf->xu.data(), layer.w1->i8.q, layer.w1->i8.scales, tbuf->x_i8.data(), x_scale,
+        tbuf->xu.data(), layer.w1.i8.q, layer.w1.i8.scales, tbuf->x_i8.data(), x_scale,
         tcfg->mlp_dim, embed_dim, true
       );
     }
@@ -4311,14 +4272,14 @@ forward_text_decode(
     if (!quant)
     {
       gemv_fpx(
-        tbuf->x.data(), layer.w3->fpx, tbuf->xg.data(), embed_dim, tcfg->mlp_dim, true
+        tbuf->x.data(), layer.w3.fpx, tbuf->xg.data(), embed_dim, tcfg->mlp_dim, true
       );
     }
     else
     {
       floatx xscale = quantize_act(tbuf->xg_i8.data(), tbuf->xg.data(), tcfg->mlp_dim);
       gemv_int8(
-        tbuf->x.data(), layer.w3->i8.q, layer.w3->i8.scales, tbuf->xg_i8.data(), xscale,
+        tbuf->x.data(), layer.w3.i8.q, layer.w3.i8.scales, tbuf->xg_i8.data(), xscale,
         embed_dim, tcfg->mlp_dim, true
       );
     }
@@ -4351,7 +4312,7 @@ forward_text_decode(
     if (!quant)
     {
       gemv_fpx(
-        tbuf->logits.data(), dec->embedding->fpx, tbuf->x.data(), tcfg->vocab_size, embed_dim,
+        tbuf->logits.data(), dec->embedding.fpx, tbuf->x.data(), tcfg->vocab_size, embed_dim,
         true
       );
     }
@@ -4359,7 +4320,7 @@ forward_text_decode(
     {
       floatx xscale = quantize_act(tbuf->x_i8.data(), tbuf->x.data(), embed_dim);
       gemv_int8(
-        tbuf->logits.data(), dec->embedding->i8.q, dec->embedding->i8.scales,
+        tbuf->logits.data(), dec->embedding.i8.q, dec->embedding.i8.scales,
         tbuf->x_i8.data(), xscale, tcfg->vocab_size, embed_dim, true
       );
     }
@@ -4479,7 +4440,7 @@ forward_text_chunk(
       if (!quant)
       {
         if (gemm_fpx(
-              xq_head, 0, layer.wq->fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
+              xq_head, 0, layer.wq.fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
               0, n_tokens, head_dim, embed_dim, false
             ) == 1)
           quit = true;
@@ -4487,8 +4448,8 @@ forward_text_chunk(
       else
       {
         if (gemm_int8(
-              xq_head, 0, layer.wq->i8.q + h * head_dim * embed_dim, 0,
-              layer.wq->i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
+              xq_head, 0, layer.wq.i8.q + h * head_dim * embed_dim, 0,
+              layer.wq.i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
               tbuf->x_scales.data(), n_tokens, head_dim, embed_dim, false
             ) == 1)
           quit = true;
@@ -4502,11 +4463,11 @@ forward_text_chunk(
       {
         // (n_tokens, n_kv_heads, head_dim)
         if (gemm_fpx(
-              xk_head, 0, layer.wk->fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
+              xk_head, 0, layer.wk.fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
               0, n_tokens, head_dim, embed_dim, false
             ) == 1 ||
             gemm_fpx(
-              xv_head, 0, layer.wv->fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
+              xv_head, 0, layer.wv.fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
               0, n_tokens, head_dim, embed_dim, false
             ) == 1)
           quit = true;
@@ -4514,13 +4475,13 @@ forward_text_chunk(
       else
       {
         if (gemm_int8(
-              xk_head, 0, layer.wk->i8.q + h * head_dim * embed_dim, 0,
-              layer.wk->i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
+              xk_head, 0, layer.wk.i8.q + h * head_dim * embed_dim, 0,
+              layer.wk.i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
               tbuf->x_scales.data(), n_tokens, head_dim, embed_dim, false
             ) == 1 ||
             gemm_int8(
-              xv_head, 0, layer.wv->i8.q + h * head_dim * embed_dim, 0,
-              layer.wv->i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
+              xv_head, 0, layer.wv.i8.q + h * head_dim * embed_dim, 0,
+              layer.wv.i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
               tbuf->x_scales.data(), n_tokens, head_dim, embed_dim, false
             ) == 1)
           quit = true;
@@ -4784,7 +4745,7 @@ forward_text_chunk(
     if (!quant)
     {
       if (gemm_fpx(
-            tbuf->x.data(), 0, layer.wo->fpx, 0, tbuf->xo.data(), q_size, n_tokens,
+            tbuf->x.data(), 0, layer.wo.fpx, 0, tbuf->xo.data(), q_size, n_tokens,
             embed_dim, q_size, true
           ) == 1)
         return 1;
@@ -4795,7 +4756,7 @@ forward_text_chunk(
         tbuf->xo_i8.data(), tbuf->xo_scales.data(), tbuf->xo.data(), q_size, n_tokens, q_size, true
       );
       if (gemm_int8(
-            tbuf->x.data(), 0, layer.wo->i8.q, 0, layer.wo->i8.scales, tbuf->xo_i8.data(),
+            tbuf->x.data(), 0, layer.wo.i8.q, 0, layer.wo.i8.scales, tbuf->xo_i8.data(),
             0, tbuf->xo_scales.data(), n_tokens, embed_dim, q_size, true
           ) == 1)
         return 1;
@@ -4840,11 +4801,11 @@ forward_text_chunk(
     if (!quant)
     {
       if (gemm_fpx(
-            tbuf->xu.data(), 0, layer.w1->fpx, 0, tbuf->x.data(), 0, n_tokens, tcfg->mlp_dim,
+            tbuf->xu.data(), 0, layer.w1.fpx, 0, tbuf->x.data(), 0, n_tokens, tcfg->mlp_dim,
             embed_dim, true
           ) == 1 ||
           gemm_fpx(
-            tbuf->xg.data(), 0, layer.w2->fpx, 0, tbuf->x.data(), 0, n_tokens, tcfg->mlp_dim,
+            tbuf->xg.data(), 0, layer.w2.fpx, 0, tbuf->x.data(), 0, n_tokens, tcfg->mlp_dim,
             embed_dim, true
           ) == 1)
         return 1;
@@ -4855,11 +4816,11 @@ forward_text_chunk(
         tbuf->x_i8.data(), tbuf->x_scales.data(), tbuf->x.data(), 0, n_tokens, embed_dim, true
       );
       if (gemm_int8(
-            tbuf->xu.data(), 0, layer.w1->i8.q, 0, layer.w1->i8.scales, tbuf->x_i8.data(),
+            tbuf->xu.data(), 0, layer.w1.i8.q, 0, layer.w1.i8.scales, tbuf->x_i8.data(),
             0, tbuf->x_scales.data(), n_tokens, tcfg->mlp_dim, embed_dim, true
           ) == 1 ||
           gemm_int8(
-            tbuf->xg.data(), 0, layer.w2->i8.q, 0, layer.w2->i8.scales, tbuf->x_i8.data(),
+            tbuf->xg.data(), 0, layer.w2.i8.q, 0, layer.w2.i8.scales, tbuf->x_i8.data(),
             0, tbuf->x_scales.data(), n_tokens, tcfg->mlp_dim, embed_dim, true
           ))
         return 1;
@@ -4883,7 +4844,7 @@ forward_text_chunk(
     if (!quant)
     {
       if (gemm_fpx(
-            tbuf->x.data(), 0, layer.w3->fpx, 0, tbuf->xg.data(), 0, n_tokens, embed_dim,
+            tbuf->x.data(), 0, layer.w3.fpx, 0, tbuf->xg.data(), 0, n_tokens, embed_dim,
             tcfg->mlp_dim, true
           ) == 1)
         return 1;
@@ -4894,7 +4855,7 @@ forward_text_chunk(
         tbuf->xg_i8.data(), tbuf->xg_scales.data(), tbuf->xg.data(), 0, n_tokens, tcfg->mlp_dim, true
       );
       if (gemm_int8(
-            tbuf->x.data(), 0, layer.w3->i8.q, 0, layer.w3->i8.scales, tbuf->xg_i8.data(),
+            tbuf->x.data(), 0, layer.w3.i8.q, 0, layer.w3.i8.scales, tbuf->xg_i8.data(),
             0, tbuf->xg_scales.data(), n_tokens, embed_dim, tcfg->mlp_dim, true
           ) == 1)
         return 1;
@@ -4938,7 +4899,7 @@ forward_text_chunk(
     if (!quant)
     {
       gemv_fpx(
-        tbuf->logits.data(), dec->embedding->fpx, last_x, tcfg->vocab_size, embed_dim,
+        tbuf->logits.data(), dec->embedding.fpx, last_x, tcfg->vocab_size, embed_dim,
         true
       );
     }
@@ -4946,7 +4907,7 @@ forward_text_chunk(
     {
       floatx xscale = quantize_act(tbuf->x_i8.data(), last_x, embed_dim);
       gemv_int8(
-        tbuf->logits.data(), dec->embedding->i8.q, dec->embedding->i8.scales,
+        tbuf->logits.data(), dec->embedding.i8.q, dec->embedding.i8.scales,
         tbuf->x_i8.data(), xscale, tcfg->vocab_size, embed_dim, true
       );
     }
@@ -4982,7 +4943,7 @@ forward_gemma_decode(GemmaModel *model, TextBuffer *tbuf, int token, int pos)
   if (model->quant)
   {
     // Dequantize
-    embed_scale *= dec->embedding->i8.scales[token];
+    embed_scale *= dec->embedding.i8.scales[token];
   }
 
   int embed_dim = dec->config.embed_dim;
@@ -4994,12 +4955,12 @@ forward_gemma_decode(GemmaModel *model, TextBuffer *tbuf, int token, int pos)
   {
     if (!model->quant)
     {
-      tbuf->x.data()[d] = dec->embedding->fpx[token * embed_dim + d] * embed_scale;
+      tbuf->x.data()[d] = dec->embedding.fpx[token * embed_dim + d] * embed_scale;
     }
     else
     {
       tbuf->x.data()[d] =
-        (floatx)dec->embedding->i8.q[token * embed_dim + d] * embed_scale;
+        (floatx)dec->embedding.i8.q[token * embed_dim + d] * embed_scale;
     }
   }
   if (is_interrupted()) return 1;
@@ -5041,13 +5002,13 @@ forward_gemma_prefill(
         if (!model->quant)
         {
           tbuf->x.data()[emb_off + d] =
-            dec->embedding->fpx[token * embed_dim + d];  // * 1.0f
+            dec->embedding.fpx[token * embed_dim + d];  // * 1.0f
         }
         else
         {
           tbuf->x.data()[emb_off + d] =
-            (floatx)dec->embedding->i8.q[token * embed_dim + d] *
-            dec->embedding->i8.scales[token];
+            (floatx)dec->embedding.i8.q[token * embed_dim + d] *
+            dec->embedding.i8.scales[token];
         }
       }
     }
