@@ -137,6 +137,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 #include <variant>
 
@@ -5458,7 +5459,7 @@ sample_from_logits(
 }
 
 /* The main sampling loop */
-void
+std::tuple<double, int, double, int>
 sample(
   // Input parameters
   GemmaModel   *model,
@@ -5474,12 +5475,7 @@ sample(
   void         *inject_ctx,
   InjectData (*inject_callback)(
     int token, GemmaModel *model, bool enable_mm, void *ctx
-  ),
-  // Output parameters
-  double *prefill_elapsed,
-  int    *prefill_toks,
-  double *gen_elapsed,
-  int    *gen_toks
+  )
 )
 {
   TextConfig *tcfg       = &model->decoder->config;
@@ -5497,10 +5493,8 @@ sample(
   int       bos_tok       = 0;
   InjectData injected    = {};
 
-  *prefill_elapsed = 0.0;
-  *prefill_toks    = 0;
-  *gen_elapsed     = 0.0;
-  *gen_toks        = 0;
+  std::tuple<double, int, double, int> stats{};
+  auto &[prefill_elapsed, prefill_toks, gen_elapsed, gen_toks] = stats;
 
   // `<bos>` is always the very first token of the sequence
   prf_t0      = now_sec();
@@ -5509,11 +5503,11 @@ sample(
         model, tbuf, &bos_tok, 1, &pos, chunk_size, visited, false
       ) == 1)
   {
-    return;
+    return stats;
   }
   prf_t1 = now_sec();
-  *prefill_elapsed += prf_t1 - prf_t0;
-  *prefill_toks = 1;
+  prefill_elapsed += prf_t1 - prf_t0;
+  prefill_toks = 1;
 
   injected = inject_callback(EOF, model, enable_mm, inject_ctx);
 
@@ -5523,7 +5517,7 @@ sample(
     {
       // pure auto-regressive step
       gen_t0 = now_sec();
-      if (forward_gemma_decode(model, tbuf, token, pos) == 1) return;
+      if (forward_gemma_decode(model, tbuf, token, pos) == 1) return stats;
       pos++;
 
       if (is_interrupted()) break;
@@ -5549,7 +5543,7 @@ sample(
               visited, is_last
             ) == 1)
         {
-          return;
+          return stats;
         }
       }
       else if (injected.type == INJECT_IMAG)
@@ -5558,13 +5552,13 @@ sample(
               model, tbuf, vbuf, injected.image, &pos, is_last
             ) == 1)
         {
-          return;
+          return stats;
         }
       }
 
       prf_t1 = now_sec();
-      *prefill_elapsed += prf_t1 - prf_t0;
-      *prefill_toks += pos - prev_pos;
+      prefill_elapsed += prf_t1 - prf_t0;
+      prefill_toks += pos - prev_pos;
 
       if (is_interrupted()) break;
 
@@ -5583,13 +5577,14 @@ sample(
       topk, topp, rpen
     );
     visited[token] = 1;
-    (*gen_toks)++;
+    gen_toks++;
 
     gen_t1 = now_sec();
-    *gen_elapsed += gen_t1 - gen_t0;
+    gen_elapsed += gen_t1 - gen_t0;
 
     injected = inject_callback(token, model, enable_mm, inject_ctx);
   }
+  return stats;
 }
 
 /* */
@@ -6154,7 +6149,7 @@ generate_inject_callback(
 }
 
 /* */
-void
+std::tuple<double, int, double, int>
 generate(
   // Input parameters
   GemmaModel   *model,
@@ -6167,12 +6162,7 @@ generate(
   int           topk,
   float         topp,
   float         rpen,
-  bool          enable_mm,
-  // Output parameters
-  double *prefill_elapsed,
-  int    *prefill_toks,
-  double *gen_elapsed,
-  int    *gen_toks
+  bool          enable_mm
 )
 {
   fputs(prompt, stdout);
@@ -6188,10 +6178,9 @@ generate(
     .tokens_cap = tokens_cap,
   };
 
-  sample(
+  return sample(
     model, tbuf, vbuf, seqlen, chunk_size, temperature, topk, topp, rpen,
-    enable_mm, &ctx, generate_inject_callback, prefill_elapsed, prefill_toks,
-    gen_elapsed, gen_toks
+    enable_mm, &ctx, generate_inject_callback
   );
 }
 
@@ -6343,7 +6332,7 @@ chat_inject_callback(int token, GemmaModel *model, bool enable_mm, void *ctx)
 }
 
 /* */
-void
+std::tuple<double, int, double, int>
 chat(
   // Input parameters
   GemmaModel   *model,
@@ -6355,12 +6344,7 @@ chat(
   int           topk,
   float         topp,
   float         rpen,
-  bool          enable_mm,
-  // Output parameters
-  double *prefill_elapsed,
-  int    *prefill_toks,
-  double *gen_elapsed,
-  int    *gen_toks
+  bool          enable_mm
 )
 {
 
@@ -6385,10 +6369,9 @@ chat(
     .jctx     = &jctx,
   };
 
-  sample(
+  return sample(
     model, tbuf, vbuf, seqlen, chunk_size, temperature, topk, topp, rpen,
-    enable_mm, &ctx, chat_inject_callback, prefill_elapsed, prefill_toks,
-    gen_elapsed, gen_toks
+    enable_mm, &ctx, chat_inject_callback
   );
 }
 
@@ -6738,10 +6721,6 @@ main(int argc, char **argv)
   bool         verbose     = false;
   char        *modelfile   = NULL;
   const char  *val         = NULL;
-  double       prefill_elapsed = 0.0;
-  int          prefill_toks    = 0;
-  double       gen_elapsed     = 0.0;
-  int          gen_toks        = 0;
 
   std::unique_ptr<GemmaModel> model;
   std::unique_ptr<TextBuffer> tbuf;
@@ -6955,22 +6934,15 @@ main(int argc, char **argv)
     // clang-format on
   }
 
-  if (chatmode)
-  {
-    chat(
-      model.get(), tbuf.get(), vbuf.get(), (int)seqlen, (int)chunk_size, temperature, (int)topk,
-      topp, rpen, enable_mm, &prefill_elapsed, &prefill_toks, &gen_elapsed,
-      &gen_toks
-    );
-  }
-  else
-  {
-    generate(
-      model.get(), tbuf.get(), vbuf.get(), prompt, (int)seqlen, (int)chunk_size, temperature,
-      (int)topk, topp, rpen, enable_mm, &prefill_elapsed, &prefill_toks,
-      &gen_elapsed, &gen_toks
-    );
-  }
+  auto [prefill_elapsed, prefill_toks, gen_elapsed, gen_toks] = chatmode
+    ? chat(
+        model.get(), tbuf.get(), vbuf.get(), (int)seqlen, (int)chunk_size,
+        temperature, (int)topk, topp, rpen, enable_mm
+      )
+    : generate(
+        model.get(), tbuf.get(), vbuf.get(), prompt, (int)seqlen, (int)chunk_size,
+        temperature, (int)topk, topp, rpen, enable_mm
+      );
 
   if (verbose)
   {
