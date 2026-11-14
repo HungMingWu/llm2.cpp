@@ -1919,6 +1919,7 @@ struct VisionBuffer
   std::vector<floatx> mlp_hidden;  // (n_patches, mlp_dim)
   std::vector<floatx> scores;      // (n_heads, n_patches, n_patches)
 
+  VisionBuffer(const VisionConfig &vcfg, bool quant);
 };
 
 size_t
@@ -1949,34 +1950,31 @@ get_vision_buffer_size(VisionConfig *vcfg, bool quant)
 }
 
 /* */
-VisionBuffer *
-malloc_vision_buffer(VisionConfig *vcfg, bool quant)
+VisionBuffer::VisionBuffer(const VisionConfig &vcfg, bool quant)
 {
-  auto vbuf = std::make_unique<VisionBuffer>();
-  size_t embed_dim = (size_t)vcfg->hidden_dim;
-  size_t ppi = (size_t)vcfg->image_size / vcfg->patch_size;
+  size_t embed_dim = (size_t)vcfg.hidden_dim;
+  size_t ppi = (size_t)vcfg.image_size / vcfg.patch_size;
   size_t n_patches = ppi * ppi;
-  size_t mlp_dim = (size_t)vcfg->mlp_dim;
-  size_t n_heads = (size_t)vcfg->n_heads;
+  size_t mlp_dim = (size_t)vcfg.mlp_dim;
+  size_t n_heads = (size_t)vcfg.n_heads;
 
   if (quant)
   {
     // Quantization buffers
-    vbuf->x_i8.resize(n_patches * embed_dim);
-    vbuf->mlp_i8.resize(n_patches * mlp_dim);
-    vbuf->x_scales.resize(n_patches);
-    vbuf->mlp_scales.resize(n_patches);
+    x_i8.resize(n_patches * embed_dim);
+    mlp_i8.resize(n_patches * mlp_dim);
+    x_scales.resize(n_patches);
+    mlp_scales.resize(n_patches);
   }
 
-  vbuf->x.resize(n_patches * embed_dim);
-  vbuf->resid.resize(n_patches * embed_dim);
-  vbuf->xq.resize(n_patches * embed_dim);
-  vbuf->xk.resize(n_patches * embed_dim);
-  vbuf->xv.resize(n_patches * embed_dim);
-  vbuf->att_out.resize(n_patches * embed_dim);
-  vbuf->mlp_hidden.resize(n_patches * mlp_dim);
-  vbuf->scores.resize(n_heads * n_patches * n_patches);
-  return vbuf.release();
+  x.resize(n_patches * embed_dim);
+  resid.resize(n_patches * embed_dim);
+  xq.resize(n_patches * embed_dim);
+  xk.resize(n_patches * embed_dim);
+  xv.resize(n_patches * embed_dim);
+  att_out.resize(n_patches * embed_dim);
+  mlp_hidden.resize(n_patches * mlp_dim);
+  scores.resize(n_heads * n_patches * n_patches);
 }
 
 /* Gemma language model runtime buffer */
@@ -6491,8 +6489,7 @@ main(int argc, char **argv)
   std::unique_ptr<VisionBuffer> vbuf;
   if (use_mm)
   {
-    vbuf.reset(malloc_vision_buffer(vcfg, model->quant));
-    if (!vbuf) return 1;
+    vbuf = std::make_unique<VisionBuffer>(*vcfg, model->quant);
   }
 
   if (options.verbose)
