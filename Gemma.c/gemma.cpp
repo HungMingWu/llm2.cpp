@@ -2012,7 +2012,8 @@ struct TextBuffer
   std::vector<floatx> xg;      // ([n_tokens], mlp_dim,)
   std::vector<floatx> xu;      // ([n_tokens], mlp_dim,)
   std::vector<floatx> logits;  // (vocab_size,)
-
+  TextBuffer(const TextConfig &tcfg, bool multimodal, int cache_len,
+	     int chunk_size, bool use_mm, bool quant);
 };
 
 /* */
@@ -2060,57 +2061,53 @@ get_text_buffer_size(
 }
 
 /* */
-std::unique_ptr<TextBuffer>
-malloc_text_buffer(
-  TextConfig   *tcfg,
-  VisionConfig *vcfg,
+TextBuffer::TextBuffer(
+  const TextConfig &tcfg,
+  bool multimodal,
   int           cache_len,
   int           chunk_size,
   bool          use_mm,
   bool          quant
-)
+) : cache_len(cache_len)
 {
-  auto tbuf = std::make_unique<TextBuffer>();
-  int embed_dim = tcfg->embed_dim;
-  int n_layers = tcfg->n_layers;
-  int head_dim = tcfg->head_dim;
-  int n_heads = tcfg->n_heads;
-  int mlp_dim = tcfg->mlp_dim;
+  int embed_dim = tcfg.embed_dim;
+  int n_layers = tcfg.n_layers;
+  int head_dim = tcfg.head_dim;
+  int n_heads = tcfg.n_heads;
+  int mlp_dim = tcfg.mlp_dim;
   int q_size = n_heads * head_dim;
-  int kv_size = tcfg->n_kv_heads * head_dim;
+  int kv_size = tcfg.n_kv_heads * head_dim;
   int mult = chunk_size;
-  tbuf->cache_len = cache_len;
-  tbuf->kv_cache.resize((size_t)n_layers * 2 * (size_t)cache_len * (size_t)kv_size);
-  tbuf->logits.resize(tcfg->vocab_size);
+  kv_cache.resize((size_t)n_layers * 2 * (size_t)cache_len * (size_t)kv_size);
+  logits.resize(tcfg.vocab_size);
   // Multimodal models need space for a whole image worth of tokens
-  if (use_mm && vcfg != NULL)
+  if (use_mm && multimodal)
   {
-    mult = std::max<int>(mult, tcfg->image_toks);
+    mult = std::max<int>(mult, tcfg.image_toks);
   }
 
   if (quant)
   {
     // Quantization buffers
-    tbuf->x_i8.resize(mult * embed_dim);
-    tbuf->xo_i8.resize(mult * q_size);
-    tbuf->xg_i8.resize(mult * mlp_dim);
-    tbuf->x_scales.resize(mult);
-    tbuf->xo_scales.resize(mult);
-    tbuf->xg_scales.resize(mult);
+    x_i8.resize(mult * embed_dim);
+    xo_i8.resize(mult * q_size);
+    xg_i8.resize(mult * mlp_dim);
+    x_scales.resize(mult);
+    xo_scales.resize(mult);
+    xg_scales.resize(mult);
   }
 
-  tbuf->x.resize(mult * embed_dim);
-  tbuf->resid.resize(mult * embed_dim);
-  tbuf->xq.resize(mult * q_size);
-  tbuf->xk.resize(mult * kv_size);
-  tbuf->csfreqs_slid.resize(mult * head_dim);
-  tbuf->csfreqs_full.resize(mult * head_dim);
-  tbuf->xv.resize(mult * kv_size);
-  tbuf->xo.resize(mult * q_size);
-  tbuf->att.resize(mult * n_heads * cache_len);
-  tbuf->xg.resize(mult * mlp_dim);
-  tbuf->xu.resize(mult * mlp_dim);
-  return tbuf;
+  x.resize(mult * embed_dim);
+  resid.resize(mult * embed_dim);
+  xq.resize(mult * q_size);
+  xk.resize(mult * kv_size);
+  csfreqs_slid.resize(mult * head_dim);
+  csfreqs_full.resize(mult * head_dim);
+  xv.resize(mult * kv_size);
+  xo.resize(mult * q_size);
+  att.resize(mult * n_heads * cache_len);
+  xg.resize(mult * mlp_dim);
+  xu.resize(mult * mlp_dim);
 }
 
 // Math primitives
@@ -6486,11 +6483,10 @@ main(int argc, char **argv)
              : read_gemma_model(modelfile, options.enable_mm);
   if (!model) return 1;
 
-  TextConfig *tcfg = &model->decoder->config;
+  const TextConfig &tcfg = model->decoder->config;
   bool use_mm = options.enable_mm && model->support_mm;
   VisionConfig *vcfg = model->encoder ? &model->encoder->config : nullptr;
-  std::unique_ptr<TextBuffer> tbuf = malloc_text_buffer(tcfg, vcfg, options.seqlen, options.chunk_size, use_mm, model->quant);
-  if (!tbuf) return 1;
+  TextBuffer tbuf(tcfg, vcfg != nullptr, options.seqlen, options.chunk_size, use_mm, model->quant);
 
   std::unique_ptr<VisionBuffer> vbuf;
   if (use_mm)
@@ -6516,11 +6512,11 @@ main(int argc, char **argv)
 
   auto [prefill_elapsed, prefill_toks, gen_elapsed, gen_toks] = options.chatmode
     ? chat(
-        model.get(), tbuf.get(), vbuf.get(),
+        model.get(), &tbuf, vbuf.get(),
         options
       )
     : generate(
-        model.get(), tbuf.get(), vbuf.get(),
+        model.get(), &tbuf, vbuf.get(),
         options
       );
 
