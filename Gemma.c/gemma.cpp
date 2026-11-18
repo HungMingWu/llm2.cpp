@@ -5582,8 +5582,12 @@ struct InjectStream
 
   InjectData next()
   {
-    if (current != values.end()) ++current;
-    return current == values.end() ? InjectData{.type = INJECT_DONE} : *current;
+    if (current == values.end())
+      return InjectData{.type = INJECT_DONE};
+
+    auto ret = *current;
+    ++current;
+    return ret;
   }
   InjectStream(std::generator<InjectData> values) : values(std::move(values)), current(this->values.begin()) {}
 };
