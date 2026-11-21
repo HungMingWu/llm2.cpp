@@ -658,13 +658,13 @@ get_strarr_bytes(FILE *fp, int count)
 /* Configuration for the SigLIP vision encoder */
 struct VisionConfig
 {
-  uint8_t  n_layers;    // ViT layers
-  uint8_t  n_heads;     // Attention heads
-  uint16_t image_size;  // Pixels per image side
-  uint16_t patch_size;  // Patches per image side
-  uint16_t hidden_dim;  // ViT dimension
-  uint16_t mlp_dim;     // Intermediate size in FFN
-  float    eps;         // LayerNorm epsilon
+  uint8_t nl;       /* ViT layers */
+  uint8_t n_heads;  /* attention heads */
+  uint16_t img_px;  /* pixels per image side */
+  uint16_t psize;   /* patches per image side */
+  uint16_t dim;     /* ViT dimension */
+  uint16_t mlp_dim; /* intermediate size in FFN */
+  float eps;        /* LayerNorm epsilon */
 };
 
 /* */
@@ -673,12 +673,12 @@ read_vision_config(FILE *fp)
 {
   auto vcfg = std::make_unique<VisionConfig>();
 
-  if (!read_uint8_ckd(fp, &vcfg->n_layers) ||
+  if (!read_uint8_ckd(fp, &vcfg->nl) ||
       !read_uint8_ckd(fp, &vcfg->n_heads) ||
       !read_uint16_ckd(fp, &vcfg->mlp_dim) ||
-      !read_uint16_ckd(fp, &vcfg->hidden_dim) ||
-      !read_uint16_ckd(fp, &vcfg->image_size) ||
-      !read_uint16_ckd(fp, &vcfg->patch_size) || !read_fp32_ckd(fp, &vcfg->eps))
+      !read_uint16_ckd(fp, &vcfg->dim) ||
+      !read_uint16_ckd(fp, &vcfg->img_px) ||
+      !read_uint16_ckd(fp, &vcfg->psize) || !read_fp32_ckd(fp, &vcfg->eps))
     return nullptr;
 
   return vcfg.release();
@@ -688,26 +688,26 @@ read_vision_config(FILE *fp)
 /* Configuration for the main Gemma text encoder */
 struct TextConfig
 {
-  uint8_t  n_layers;       // Transformer layers
-  uint8_t  n_heads;        // Attention heads
-  uint8_t  n_kv_heads;     // Key/value heads (GQA)
-  uint16_t head_dim;       // Dim per head
-  uint16_t embed_dim;      // Model dimension
-  uint16_t mlp_dim;        // Intermediate size in FFN
-  uint16_t q_scale;        // Scale applied to queries before attention
-  uint16_t slide_len;      // Sliding-window size
-  uint16_t image_toks;     // Number of soft tokens per image
-  uint32_t max_seqlen;     // Max number of position embeddings
-  uint32_t vocab_size;     // Number of possible tokens
-  float    local_theta;    // RoPE base for local (sliding) attention
-  float    global_theta;   // RoPE base for full attention
-  float    eps;            // RMSNorm epsilon
-  float    att_softcap;    // tanh softcap on attention scores (0 = off)
-  float    logit_softcap;  // tanh softcap on final logits (0 = off)
-  std::vector<uint8_t>    att_layers;     // true = use sliding window for that layer
-  bool     qk_norm;        // query/key RMSNorm
-  bool     pre_mlp_norm;
-  bool     pst_mlp_norm;
+  uint8_t nl;                      /* transformer layers */
+  uint8_t n_heads;                 /* attention heads */
+  uint8_t nkv;                     /* key/value heads (GQA) */
+  uint16_t hdim;                   /* dim per head */
+  uint16_t dim;                    /* model dimension */
+  uint16_t mlp_dim;                /* intermediate size in FFN */
+  uint16_t q_scale;                /* scale applied to queries before attention */
+  uint16_t slide;                  /* sliding-window size */
+  uint16_t img_tok;                /* number of soft tokens per image */
+  uint32_t max_seq;                /* max number of position embeddings */
+  uint32_t nvocab;                 /* number of possible tokens */
+  float theta_l;                   /* RoPE base for local (sliding) attention */
+  float theta_g;                   /* RoPE base for full attention */
+  float eps;                       /* RMSNorm epsilon */
+  float sc_att;                    /* tanh softcap on attention scores (0 = off) */
+  float sc_log;                    /* tanh softcap on final logits (0 = off) */
+  std::vector<uint8_t> swa;        /* true = use sliding window for that layer */
+  bool qk_norm;                    /* query/key RMSNorm */
+  bool mlp_pre;
+  bool mlp_pst;
 };
 
 /* */
@@ -715,46 +715,46 @@ static TextConfig *
 read_text_config(FILE *fp, bool *support_mm)
 {
   auto tcfg = std::make_unique<TextConfig>();
-  std::vector<char> att_layers_buf;
+  std::vector<char> swa_buf;
 
-  if (!read_uint8_ckd(fp, &tcfg->n_layers) ||
+  if (!read_uint8_ckd(fp, &tcfg->nl) ||
       !read_uint8_ckd(fp, &tcfg->n_heads) ||
-      !read_uint8_ckd(fp, &tcfg->n_kv_heads) ||
-      !read_uint16_ckd(fp, &tcfg->head_dim) ||
-      !read_uint16_ckd(fp, &tcfg->embed_dim) ||
+      !read_uint8_ckd(fp, &tcfg->nkv) ||
+      !read_uint16_ckd(fp, &tcfg->hdim) ||
+      !read_uint16_ckd(fp, &tcfg->dim) ||
       !read_uint16_ckd(fp, &tcfg->mlp_dim) ||
       !read_uint16_ckd(fp, &tcfg->q_scale) ||
-      !read_uint16_ckd(fp, &tcfg->slide_len) ||
-      !read_uint16_ckd(fp, &tcfg->image_toks) ||
-      !read_uint32_ckd(fp, &tcfg->max_seqlen) ||
-      !read_uint32_ckd(fp, &tcfg->vocab_size) ||
-      !read_fp32_ckd(fp, &tcfg->local_theta) ||
-      !read_fp32_ckd(fp, &tcfg->global_theta) ||
+      !read_uint16_ckd(fp, &tcfg->slide) ||
+      !read_uint16_ckd(fp, &tcfg->img_tok) ||
+      !read_uint32_ckd(fp, &tcfg->max_seq) ||
+      !read_uint32_ckd(fp, &tcfg->nvocab) ||
+      !read_fp32_ckd(fp, &tcfg->theta_l) ||
+      !read_fp32_ckd(fp, &tcfg->theta_g) ||
       !read_fp32_ckd(fp, &tcfg->eps) ||
-      !read_fp32_ckd(fp, &tcfg->att_softcap) ||
-      !read_fp32_ckd(fp, &tcfg->logit_softcap))
+      !read_fp32_ckd(fp, &tcfg->sc_att) ||
+      !read_fp32_ckd(fp, &tcfg->sc_log))
     return nullptr;
 
   // Packed bit-field of which layers use sliding-window attention
   // A terrible terrible idea, wish I didn't do this
   uint8_t n_bytes;
   if (!read_uint8_ckd(fp, &n_bytes)) return nullptr;
-  if (n_bytes * 8 < tcfg->n_layers)
+  if (n_bytes * 8 < tcfg->nl)
   {
-    log_error("insufficient att_layers bytes");
+    log_error("insufficient swa bytes");
     return nullptr;
   }
-  att_layers_buf.resize(n_bytes);
-  tcfg->att_layers.resize(tcfg->n_layers);
-  if (!fread_ckd(att_layers_buf.data(), n_bytes, sizeof(char), fp))
+  swa_buf.resize(n_bytes);
+  tcfg->swa.resize(tcfg->nl);
+  if (!fread_ckd(swa_buf.data(), n_bytes, sizeof(char), fp))
     return nullptr;
 
-  for (int i = 0; i < tcfg->n_layers; i++)
+  for (int i = 0; i < tcfg->nl; i++)
   {
     int pos             = i;
     int byte_idx        = pos / 8;
     int bit_idx         = 7 - (pos % 8);
-    tcfg->att_layers[i] = (att_layers_buf[byte_idx] >> bit_idx) & 1;
+    tcfg->swa[i] = (swa_buf[byte_idx] >> bit_idx) & 1;
   }
 
   // Extra feature flags packed into one byte
@@ -762,8 +762,8 @@ read_text_config(FILE *fp, bool *support_mm)
   if (!read_uint8_ckd(fp, &extra_flags)) return nullptr;
   *support_mm        = (extra_flags & 8) == 8;
   tcfg->qk_norm      = (extra_flags & 4) == 4;
-  tcfg->pre_mlp_norm = (extra_flags & 2) == 2;
-  tcfg->pst_mlp_norm = (extra_flags & 1) == 1;
+  tcfg->mlp_pre = (extra_flags & 2) == 2;
+  tcfg->mlp_pst = (extra_flags & 1) == 1;
 
   return tcfg.release();
 
@@ -803,7 +803,7 @@ struct GemmaTokenizer
 {
   uint32_t n_merges;
 
-  int vocab_size;
+  int nvocab;
   int max_toklen;
   int bos;  // beginning of sequence
   int eos;  // end of sequence
@@ -858,23 +858,23 @@ read_tokenizer(FILE *fp, TextConfig *tcfg, bool support_mm)
   auto tok = std::make_unique<GemmaTokenizer>();
   size_t offset = 0;
 
-  tok->vocab_size = tcfg->vocab_size;
+  tok->nvocab = tcfg->nvocab;
   if (support_mm)
   {
-    tok->vocab_size++;
+    tok->nvocab++;
   }  // ++ for the <image_soft_token>
 
-  std::optional<size_t> vocab_data_bytes = get_strarr_bytes(fp, tok->vocab_size);
+  std::optional<size_t> vocab_data_bytes = get_strarr_bytes(fp, tok->nvocab);
   if (!vocab_data_bytes.has_value()) return nullptr;
 
   tok->vocab_data.resize(*vocab_data_bytes);
-  tok->vocab.resize(tok->vocab_size);
+  tok->vocab.resize(tok->nvocab);
 
-  tok->vocab_sorted.resize(tok->vocab_size);
+  tok->vocab_sorted.resize(tok->nvocab);
 
   offset = 0;
   tok->max_toklen = 0;
-  for (int i = 0; i < tok->vocab_size; i++)
+  for (int i = 0; i < tok->nvocab; i++)
   {
     char *str;
     if (!read_str_ckd(&str, fp, tok->vocab_data.data(), &offset)) return nullptr;
@@ -1143,23 +1143,23 @@ struct TextDecoderLayer
   // Attention weights
   // 2D weights are stored transposed for better GEMV cache use
 
-  QTensor wq;  // (embed_dim, n_heads * head_dim).T
-  QTensor wk;  // (embed_dim, n_kv_heads * head_dim).T
-  QTensor wv;  // (embed_dim, n_kv_heads * head_dim).T
-  QTensor wo;  // (n_heads * head_dim, embed_dim).T
+  QTensor wq;  // (dim, n_heads * hdim).T
+  QTensor wk;  // (dim, nkv * hdim).T
+  QTensor wv;  // (dim, nkv * hdim).T
+  QTensor wo;  // (n_heads * hdim, dim).T
 
   // Feedforward weights
-  QTensor w1;  // (embed_dim, mlp_dim).T
-  QTensor w2;  // (embed_dim, mlp_dim).T
-  QTensor w3;  // (mlp_dim, embed_dim).T
+  QTensor w1;  // (dim, mlp_dim).T
+  QTensor w2;  // (dim, mlp_dim).T
+  QTensor w3;  // (mlp_dim, dim).T
 
   // RMSNorm weights (Gemma adds 1.0 to the weight)
-  floatx *nq;  // (head_dim,)
-  floatx *nk;  // (head_dim,)
-  floatx *n1;  // (embed_dim,)
-  floatx *n2;  // (embed_dim,)
-  floatx *n3;  // (embed_dim,)
-  floatx *n4;  // (embed_dim,)
+  floatx *nq;  // (hdim,)
+  floatx *nk;  // (hdim,)
+  floatx *n1;  // (dim,)
+  floatx *n2;  // (dim,)
+  floatx *n3;  // (dim,)
+  floatx *n4;  // (dim,)
 
   // Storage is empty when the corresponding pointer borrows mmap memory.
   std::vector<floatx> nq_data;
@@ -1174,26 +1174,26 @@ struct TextDecoderLayer
 struct VisionEncoderLayer
 {
   // ViT attention weights
-  QTensor wq;  // (hidden_dim, hidden_dim).T
-  QTensor wk;  // (hidden_dim, hidden_dim).T
-  QTensor wv;  // (hidden_dim, hidden_dim).T
-  QTensor wo;  // (hidden_dim, hidden_dim).T
-  floatx  *bq;  // (hidden_dim,)
-  floatx  *bk;  // (hidden_dim,)
-  floatx  *bv;  // (hidden_dim,)
-  floatx  *bo;  // (hidden_dim,)
+  QTensor wq;  // (dim, dim).T
+  QTensor wk;  // (dim, dim).T
+  QTensor wv;  // (dim, dim).T
+  QTensor wo;  // (dim, dim).T
+  floatx  *bq;  // (dim,)
+  floatx  *bk;  // (dim,)
+  floatx  *bv;  // (dim,)
+  floatx  *bo;  // (dim,)
 
   // ViT feedforward weights
-  QTensor w1;  // (hidden_dim, mlp_dim).T
-  QTensor w2;  // (hidden_dim, mlp_dim).T
+  QTensor w1;  // (dim, mlp_dim).T
+  QTensor w2;  // (dim, mlp_dim).T
   floatx  *b1;  // (mlp_dim,)
   floatx  *b2;  // (mlp_dim,)
 
   // ViT layernorm weights
-  floatx *n1;    // (hidden_dim,)
-  floatx *n2;    // (hidden_dim,)
-  floatx *n1_b;  // (hidden_dim,)
-  floatx *n2_b;  // (hidden_dim,)
+  floatx *n1;    // (dim,)
+  floatx *n2;    // (dim,)
+  floatx *n1_b;  // (dim,)
+  floatx *n2_b;  // (dim,)
 
   // Storage is empty when the corresponding pointer borrows mmap memory.
   std::vector<floatx> bq_data;
@@ -1212,10 +1212,10 @@ struct VisionEncoderLayer
 struct TextDecoder
 {
   TextConfig config;
-  // (vocab_size, embed_dim), shared with lm_head (tied weights)
+  // (nvocab, dim), shared with lm_head (tied weights)
   QTensor embedding;
   std::vector<TextDecoderLayer> layers;
-  floatx            *final_norm;  // (embed_dim,)
+  floatx            *final_norm;  // (dim,)
 
   // Storage is empty when the corresponding pointer borrows mmap memory.
   std::vector<floatx> final_norm_data;
@@ -1226,52 +1226,52 @@ size_t
 get_text_decoder_size(const TextConfig *tcfg, bool quant)
 {
   size_t size       = 0;
-  int    embed_dim  = tcfg->embed_dim;
+  int    dim  = tcfg->dim;
   int    mlp_dim    = tcfg->mlp_dim;
-  int    q_size     = tcfg->n_heads * tcfg->head_dim;
-  int    kv_size    = tcfg->n_kv_heads * tcfg->head_dim;
-  int    vocab_size = tcfg->vocab_size;
+  int    q_size     = tcfg->n_heads * tcfg->hdim;
+  int    kv_size    = tcfg->nkv * tcfg->hdim;
+  int    nvocab = tcfg->nvocab;
 
-  // embedding: linear (embed_dim -> vocab_size)
-  size += qtensor_size(embed_dim, vocab_size, quant);
+  // embedding: linear (dim -> nvocab)
+  size += qtensor_size(dim, nvocab, quant);
 
-  for (int l = 0; l < tcfg->n_layers; l++)
+  for (int l = 0; l < tcfg->nl; l++)
   {
     // wq, wk, wv, wo
-    size += qtensor_size(embed_dim, q_size, quant);
-    size += qtensor_size(embed_dim, kv_size, quant);
-    size += qtensor_size(embed_dim, kv_size, quant);
-    size += qtensor_size(q_size, embed_dim, quant);
+    size += qtensor_size(dim, q_size, quant);
+    size += qtensor_size(dim, kv_size, quant);
+    size += qtensor_size(dim, kv_size, quant);
+    size += qtensor_size(q_size, dim, quant);
 
     // optional nq, nk
     if (tcfg->qk_norm)
     {
-      size += (size_t)tcfg->head_dim * sizeof(floatx);
-      size += (size_t)tcfg->head_dim * sizeof(floatx);
+      size += (size_t)tcfg->hdim * sizeof(floatx);
+      size += (size_t)tcfg->hdim * sizeof(floatx);
     }
 
     // w1, w2, w3
-    size += qtensor_size(embed_dim, mlp_dim, quant);
-    size += qtensor_size(embed_dim, mlp_dim, quant);
-    size += qtensor_size(mlp_dim, embed_dim, quant);
+    size += qtensor_size(dim, mlp_dim, quant);
+    size += qtensor_size(dim, mlp_dim, quant);
+    size += qtensor_size(mlp_dim, dim, quant);
 
     // n1, n2
-    size += (size_t)embed_dim * sizeof(floatx);
-    size += (size_t)embed_dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
 
     // optional n3, n4
-    if (tcfg->pre_mlp_norm)
+    if (tcfg->mlp_pre)
     {
-      size += (size_t)embed_dim * sizeof(floatx);
+      size += (size_t)dim * sizeof(floatx);
     }
-    if (tcfg->pst_mlp_norm)
+    if (tcfg->mlp_pst)
     {
-      size += (size_t)embed_dim * sizeof(floatx);
+      size += (size_t)dim * sizeof(floatx);
     }
   }
 
   // final_norm
-  size += (size_t)embed_dim * sizeof(floatx);
+  size += (size_t)dim * sizeof(floatx);
 
   return size;
 }
@@ -1281,36 +1281,36 @@ static std::unique_ptr<TextDecoder>
 read_text_decoder(FILE *fp, TextConfig *tcfg, bool quant)
 {
   auto dec = std::make_unique<TextDecoder>();
-  int embed_dim = tcfg->embed_dim;
+  int dim = tcfg->dim;
   int mlp_dim = tcfg->mlp_dim;
-  int q_size = tcfg->n_heads * tcfg->head_dim;
-  int kv_size = tcfg->n_kv_heads * tcfg->head_dim;
-  int vocab_size = tcfg->vocab_size;
+  int q_size = tcfg->n_heads * tcfg->hdim;
+  int kv_size = tcfg->nkv * tcfg->hdim;
+  int nvocab = tcfg->nvocab;
   dec->config = *tcfg;
 
-  /* The embedding shape is (vocab_size, embed_dim), but it uses per-tensor
+  /* The embedding shape is (nvocab, dim), but it uses per-tensor
    * quantization rather than per-channel like other weights. Gemma uses tied
    * weights, which means the final lm_head shares the same weights with the
    * embedding table, but transposed. So it becomes per-channel quantization in
    * the final lm_head. */
 
-  read_qtensor(&dec->embedding, fp, embed_dim, vocab_size, quant);
-  dec->layers.resize(tcfg->n_layers);
+  read_qtensor(&dec->embedding, fp, dim, nvocab, quant);
+  dec->layers.resize(tcfg->nl);
 
   // Read all the layers
   for (auto &layer : dec->layers)
   {
     // Attention weights
-    read_qtensor(&layer.wq, fp, embed_dim, q_size, quant);
-    read_qtensor(&layer.wk, fp, embed_dim, kv_size, quant);
-    read_qtensor(&layer.wv, fp, embed_dim, kv_size, quant);
-    read_qtensor(&layer.wo, fp, q_size, embed_dim, quant);
+    read_qtensor(&layer.wq, fp, dim, q_size, quant);
+    read_qtensor(&layer.wk, fp, dim, kv_size, quant);
+    read_qtensor(&layer.wv, fp, dim, kv_size, quant);
+    read_qtensor(&layer.wo, fp, q_size, dim, quant);
 
     if (tcfg->qk_norm)
     {
       // QK RMSNorms
-      if (!read_tensor_ckd(layer.nq_data, layer.nq, tcfg->head_dim, fp) ||
-          !read_tensor_ckd(layer.nk_data, layer.nk, tcfg->head_dim, fp))
+      if (!read_tensor_ckd(layer.nq_data, layer.nq, tcfg->hdim, fp) ||
+          !read_tensor_ckd(layer.nk_data, layer.nk, tcfg->hdim, fp))
         return nullptr;
     }
     else
@@ -1320,27 +1320,27 @@ read_text_decoder(FILE *fp, TextConfig *tcfg, bool quant)
     }
 
     // Feedforward weights
-    read_qtensor(&layer.w1, fp, embed_dim, mlp_dim, quant);
-    read_qtensor(&layer.w2, fp, embed_dim, mlp_dim, quant);
-    read_qtensor(&layer.w3, fp, mlp_dim, embed_dim, quant);
+    read_qtensor(&layer.w1, fp, dim, mlp_dim, quant);
+    read_qtensor(&layer.w2, fp, dim, mlp_dim, quant);
+    read_qtensor(&layer.w3, fp, mlp_dim, dim, quant);
     if (
       // RMSNorm weights
-      !read_tensor_ckd(layer.n1_data, layer.n1, embed_dim, fp) ||
-      !read_tensor_ckd(layer.n2_data, layer.n2, embed_dim, fp))
+      !read_tensor_ckd(layer.n1_data, layer.n1, dim, fp) ||
+      !read_tensor_ckd(layer.n2_data, layer.n2, dim, fp))
       return nullptr;
 
-    if (tcfg->pre_mlp_norm)
+    if (tcfg->mlp_pre)
     {
-      if (!read_tensor_ckd(layer.n3_data, layer.n3, embed_dim, fp))
+      if (!read_tensor_ckd(layer.n3_data, layer.n3, dim, fp))
         return nullptr;
     }
     else
     {
       layer.n3 = NULL;
     }
-    if (tcfg->pst_mlp_norm)
+    if (tcfg->mlp_pst)
     {
-      if (!read_tensor_ckd(layer.n4_data, layer.n4, embed_dim, fp))
+      if (!read_tensor_ckd(layer.n4_data, layer.n4, dim, fp))
         return nullptr;
     }
     else
@@ -1349,7 +1349,7 @@ read_text_decoder(FILE *fp, TextConfig *tcfg, bool quant)
     }
   }
 
-  if (!read_tensor_ckd(dec->final_norm_data, dec->final_norm, embed_dim, fp))
+  if (!read_tensor_ckd(dec->final_norm_data, dec->final_norm, dim, fp))
     return nullptr;
 
   return dec;
@@ -1361,35 +1361,35 @@ mmap_text_decoder(void *data, TextConfig *tcfg, size_t *offset, bool quant)
 {
   auto dec = std::make_unique<TextDecoder>();
   uint8_t *base = (uint8_t *)data;
-  int embed_dim = tcfg->embed_dim;
+  int dim = tcfg->dim;
   int mlp_dim = tcfg->mlp_dim;
-  int q_size = tcfg->n_heads * tcfg->head_dim;
-  int kv_size = tcfg->n_kv_heads * tcfg->head_dim;
-  int vocab_size = tcfg->vocab_size;
+  int q_size = tcfg->n_heads * tcfg->hdim;
+  int kv_size = tcfg->nkv * tcfg->hdim;
+  int nvocab = tcfg->nvocab;
   dec->config = *tcfg;
 
-  // Embedding: linear (embed_dim -> vocab_size)
-  mmap_qtensor(&dec->embedding, base, offset, embed_dim, vocab_size, quant);
+  // Embedding: linear (dim -> nvocab)
+  mmap_qtensor(&dec->embedding, base, offset, dim, nvocab, quant);
 
   // Layers array
-  dec->layers.resize(tcfg->n_layers);
+  dec->layers.resize(tcfg->nl);
 
   for (auto &layer : dec->layers)
   {
 
     // Attention weights
-    mmap_qtensor(&layer.wq, base, offset, embed_dim, q_size, quant);
-    mmap_qtensor(&layer.wk, base, offset, embed_dim, kv_size, quant);
-    mmap_qtensor(&layer.wv, base, offset, embed_dim, kv_size, quant);
-    mmap_qtensor(&layer.wo, base, offset, q_size, embed_dim, quant);
+    mmap_qtensor(&layer.wq, base, offset, dim, q_size, quant);
+    mmap_qtensor(&layer.wk, base, offset, dim, kv_size, quant);
+    mmap_qtensor(&layer.wv, base, offset, dim, kv_size, quant);
+    mmap_qtensor(&layer.wo, base, offset, q_size, dim, quant);
 
     // QK normalization (optional)
     if (tcfg->qk_norm)
     {
       layer.nq = (floatx *)(base + *offset);
-      *offset += (size_t)tcfg->head_dim * sizeof(floatx);
+      *offset += (size_t)tcfg->hdim * sizeof(floatx);
       layer.nk = (floatx *)(base + *offset);
-      *offset += (size_t)tcfg->head_dim * sizeof(floatx);
+      *offset += (size_t)tcfg->hdim * sizeof(floatx);
     }
     else
     {
@@ -1398,31 +1398,31 @@ mmap_text_decoder(void *data, TextConfig *tcfg, size_t *offset, bool quant)
     }
 
     // Feedforward weights
-    mmap_qtensor(&layer.w1, base, offset, embed_dim, mlp_dim, quant);
-    mmap_qtensor(&layer.w2, base, offset, embed_dim, mlp_dim, quant);
-    mmap_qtensor(&layer.w3, base, offset, mlp_dim, embed_dim, quant);
+    mmap_qtensor(&layer.w1, base, offset, dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w2, base, offset, dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w3, base, offset, mlp_dim, dim, quant);
 
     // RMSNorm weights
     layer.n1 = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
     layer.n2 = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
 
     // Optional pre/post MLP norms
-    if (tcfg->pre_mlp_norm)
+    if (tcfg->mlp_pre)
     {
       layer.n3 = (floatx *)(base + *offset);
-      *offset += (size_t)embed_dim * sizeof(floatx);
+      *offset += (size_t)dim * sizeof(floatx);
     }
     else
     {
       layer.n3 = NULL;
     }
 
-    if (tcfg->pst_mlp_norm)
+    if (tcfg->mlp_pst)
     {
       layer.n4 = (floatx *)(base + *offset);
-      *offset += (size_t)embed_dim * sizeof(floatx);
+      *offset += (size_t)dim * sizeof(floatx);
     }
     else
     {
@@ -1433,7 +1433,7 @@ mmap_text_decoder(void *data, TextConfig *tcfg, size_t *offset, bool quant)
 
   // Final norm
   dec->final_norm = (floatx *)(base + *offset);
-  *offset += (size_t)embed_dim * sizeof(floatx);
+  *offset += (size_t)dim * sizeof(floatx);
 
   return dec.release();
 
@@ -1444,16 +1444,16 @@ struct VisionEncoder
 {
   VisionConfig config;
 
-  floatx  *patch_emb;      // (hidden_dim, 3, patch_size, patch_size)
-  floatx  *patch_emb_b;    // (hidden_dim,)
-  QTensor pos_embedding;  // ((image_size / patch_size)^2, hidden_dim)
+  floatx  *patch_emb;      // (dim, 3, psize, psize)
+  floatx  *patch_emb_b;    // (dim,)
+  QTensor pos_embedding;  // ((img_px / psize)^2, dim)
 
   std::vector<VisionEncoderLayer> layers;
 
-  floatx  *post_norm;    // (hidden_dim,)
-  floatx  *post_norm_b;  // (hidden_dim,)
-  floatx  *norm;         // (hidden_dim,)
-  QTensor proj;         // (hidden_dim, embed_dim).T
+  floatx  *post_norm;    // (dim,)
+  floatx  *post_norm_b;  // (dim,)
+  floatx  *norm;         // (dim,)
+  QTensor proj;         // (dim, dim).T
 
   // Storage is empty when the corresponding pointer borrows mmap memory.
   std::vector<floatx> patch_emb_data;
@@ -1470,61 +1470,61 @@ get_vision_encoder_size(
 )
 {
   size_t size      = 0;
-  int    P         = vcfg->patch_size;
-  int    embed_dim = vcfg->hidden_dim;
+  int    P         = vcfg->psize;
+  int    dim = vcfg->dim;
   int    mlp_dim   = vcfg->mlp_dim;
-  int    n_patches = vcfg->image_size / P;
+  int    n_patches = vcfg->img_px / P;
   n_patches *= n_patches;
 
   // patch_emb
-  size += (size_t)embed_dim * 3 * P * P * sizeof(floatx);
+  size += (size_t)dim * 3 * P * P * sizeof(floatx);
   // patch_emb_b
-  size += (size_t)embed_dim * sizeof(floatx);
+  size += (size_t)dim * sizeof(floatx);
 
-  // pos_embedding: linear (embed_dim -> n_patches)
-  size += qtensor_size(embed_dim, n_patches, quant);
+  // pos_embedding: linear (dim -> n_patches)
+  size += qtensor_size(dim, n_patches, quant);
 
   // each layer
-  for (int l = 0; l < vcfg->n_layers; l++)
+  for (int l = 0; l < vcfg->nl; l++)
   {
     // n1, n1_b
-    size += (size_t)embed_dim * sizeof(floatx);
-    size += (size_t)embed_dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
 
-    // wq, wk, wv, wo: linear (embed_dim -> embed_dim)
-    size += qtensor_size(embed_dim, embed_dim, quant);
-    size += qtensor_size(embed_dim, embed_dim, quant);
-    size += qtensor_size(embed_dim, embed_dim, quant);
-    size += qtensor_size(embed_dim, embed_dim, quant);
+    // wq, wk, wv, wo: linear (dim -> dim)
+    size += qtensor_size(dim, dim, quant);
+    size += qtensor_size(dim, dim, quant);
+    size += qtensor_size(dim, dim, quant);
+    size += qtensor_size(dim, dim, quant);
 
     // bq, bk, bv, bo
-    size += (size_t)embed_dim * sizeof(floatx);
-    size += (size_t)embed_dim * sizeof(floatx);
-    size += (size_t)embed_dim * sizeof(floatx);
-    size += (size_t)embed_dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
 
     // n2, n2_b
-    size += (size_t)embed_dim * sizeof(floatx);
-    size += (size_t)embed_dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
 
-    // w1: linear (embed_dim -> mlp_dim), w2: linear (mlp_dim -> embed_dim)
-    size += qtensor_size(embed_dim, mlp_dim, quant);
-    size += qtensor_size(mlp_dim, embed_dim, quant);
+    // w1: linear (dim -> mlp_dim), w2: linear (mlp_dim -> dim)
+    size += qtensor_size(dim, mlp_dim, quant);
+    size += qtensor_size(mlp_dim, dim, quant);
 
-    // b1 (mlp_dim), b2 (embed_dim)
+    // b1 (mlp_dim), b2 (dim)
     size += (size_t)mlp_dim * sizeof(floatx);
-    size += (size_t)embed_dim * sizeof(floatx);
+    size += (size_t)dim * sizeof(floatx);
   }
 
   // post_norm, post_norm_b
-  size += (size_t)embed_dim * sizeof(floatx);
-  size += (size_t)embed_dim * sizeof(floatx);
+  size += (size_t)dim * sizeof(floatx);
+  size += (size_t)dim * sizeof(floatx);
 
   // norm
-  size += (size_t)embed_dim * sizeof(floatx);
+  size += (size_t)dim * sizeof(floatx);
 
-  // proj: linear (embed_dim -> tcfg->embed_dim)
-  size += qtensor_size(embed_dim, tcfg->embed_dim, quant);
+  // proj: linear (dim -> tcfg->dim)
+  size += qtensor_size(dim, tcfg->dim, quant);
 
   return size;
 }
@@ -1534,58 +1534,58 @@ static VisionEncoder *
 read_vision_encoder(FILE *fp, TextConfig *tcfg, VisionConfig *vcfg, bool quant)
 {
   auto enc = std::make_unique<VisionEncoder>();
-  int P = vcfg->patch_size;
-  int embed_dim = vcfg->hidden_dim;
+  int P = vcfg->psize;
+  int dim = vcfg->dim;
   int mlp_dim = vcfg->mlp_dim;
-  int n_patches = vcfg->image_size / P;
+  int n_patches = vcfg->img_px / P;
 
   enc->config = *vcfg;
 
   n_patches *= n_patches;
 
-  if (!read_tensor_ckd(enc->patch_emb_data, enc->patch_emb, (size_t)embed_dim * 3 * P * P, fp) ||
-      !read_tensor_ckd(enc->patch_emb_b_data, enc->patch_emb_b, (size_t)embed_dim, fp))
+  if (!read_tensor_ckd(enc->patch_emb_data, enc->patch_emb, (size_t)dim * 3 * P * P, fp) ||
+      !read_tensor_ckd(enc->patch_emb_b_data, enc->patch_emb_b, (size_t)dim, fp))
     return nullptr;
-  read_qtensor(&enc->pos_embedding, fp, embed_dim, n_patches, quant);
-  enc->layers.resize(vcfg->n_layers);
+  read_qtensor(&enc->pos_embedding, fp, dim, n_patches, quant);
+  enc->layers.resize(vcfg->nl);
 
   // Read all the layers of ViT
   for (auto &layer : enc->layers)
   {
     // Attention weights
-    read_qtensor(&layer.wq, fp, embed_dim, embed_dim, quant);
-    read_qtensor(&layer.wk, fp, embed_dim, embed_dim, quant);
-    read_qtensor(&layer.wv, fp, embed_dim, embed_dim, quant);
-    read_qtensor(&layer.wo, fp, embed_dim, embed_dim, quant);
+    read_qtensor(&layer.wq, fp, dim, dim, quant);
+    read_qtensor(&layer.wk, fp, dim, dim, quant);
+    read_qtensor(&layer.wv, fp, dim, dim, quant);
+    read_qtensor(&layer.wo, fp, dim, dim, quant);
     // Feedforward weights
-    read_qtensor(&layer.w1, fp, embed_dim, mlp_dim, quant);
-    read_qtensor(&layer.w2, fp, mlp_dim, embed_dim, quant);
+    read_qtensor(&layer.w1, fp, dim, mlp_dim, quant);
+    read_qtensor(&layer.w2, fp, mlp_dim, dim, quant);
     if (
       // First LayerNorm
-      !read_tensor_ckd(layer.n1_data, layer.n1, (size_t)embed_dim, fp) ||
-      !read_tensor_ckd(layer.n1_b_data, layer.n1_b, (size_t)embed_dim, fp) ||
+      !read_tensor_ckd(layer.n1_data, layer.n1, (size_t)dim, fp) ||
+      !read_tensor_ckd(layer.n1_b_data, layer.n1_b, (size_t)dim, fp) ||
       // Attention biases
-      !read_tensor_ckd(layer.bq_data, layer.bq, (size_t)embed_dim, fp) ||
-      !read_tensor_ckd(layer.bk_data, layer.bk, (size_t)embed_dim, fp) ||
-      !read_tensor_ckd(layer.bv_data, layer.bv, (size_t)embed_dim, fp) ||
-      !read_tensor_ckd(layer.bo_data, layer.bo, (size_t)embed_dim, fp) ||
+      !read_tensor_ckd(layer.bq_data, layer.bq, (size_t)dim, fp) ||
+      !read_tensor_ckd(layer.bk_data, layer.bk, (size_t)dim, fp) ||
+      !read_tensor_ckd(layer.bv_data, layer.bv, (size_t)dim, fp) ||
+      !read_tensor_ckd(layer.bo_data, layer.bo, (size_t)dim, fp) ||
       // Second LayerNorm
-      !read_tensor_ckd(layer.n2_data, layer.n2, (size_t)embed_dim, fp) ||
-      !read_tensor_ckd(layer.n2_b_data, layer.n2_b, (size_t)embed_dim, fp) ||
+      !read_tensor_ckd(layer.n2_data, layer.n2, (size_t)dim, fp) ||
+      !read_tensor_ckd(layer.n2_b_data, layer.n2_b, (size_t)dim, fp) ||
       // Feedforward biases
       !read_tensor_ckd(layer.b1_data, layer.b1, (size_t)mlp_dim, fp) ||
-      !read_tensor_ckd(layer.b2_data, layer.b2, (size_t)embed_dim, fp))
+      !read_tensor_ckd(layer.b2_data, layer.b2, (size_t)dim, fp))
       return nullptr;
   }
 
   // Final projection
-  read_qtensor(&enc->proj, fp, embed_dim, tcfg->embed_dim, quant);
+  read_qtensor(&enc->proj, fp, dim, tcfg->dim, quant);
   if (
     // Post layernorm
-    !read_tensor_ckd(enc->post_norm_data, enc->post_norm, (size_t)embed_dim, fp) ||
-    !read_tensor_ckd(enc->post_norm_b_data, enc->post_norm_b, (size_t)embed_dim, fp) ||
+    !read_tensor_ckd(enc->post_norm_data, enc->post_norm, (size_t)dim, fp) ||
+    !read_tensor_ckd(enc->post_norm_b_data, enc->post_norm_b, (size_t)dim, fp) ||
     // Soft embedding RMSNorm
-    !read_tensor_ckd(enc->norm_data, enc->norm, (size_t)embed_dim, fp))
+    !read_tensor_ckd(enc->norm_data, enc->norm, (size_t)dim, fp))
     return nullptr;
 
   return enc.release();
@@ -1600,83 +1600,83 @@ mmap_vision_encoder(
 {
   auto enc = std::make_unique<VisionEncoder>();
   uint8_t *base = (uint8_t *)data;
-  int P = vcfg->patch_size;
-  int embed_dim = vcfg->hidden_dim;
+  int P = vcfg->psize;
+  int dim = vcfg->dim;
   int mlp_dim = vcfg->mlp_dim;
-  int n_patches = vcfg->image_size / P;
+  int n_patches = vcfg->img_px / P;
   enc->config = *vcfg;
 
   n_patches *= n_patches;
 
-  // patch_emb: embed_dim * 3 * P * P floats
+  // patch_emb: dim * 3 * P * P floats
   enc->patch_emb = (floatx *)(base + *offset);
-  *offset += (size_t)embed_dim * 3 * P * P * sizeof(floatx);
+  *offset += (size_t)dim * 3 * P * P * sizeof(floatx);
 
-  // patch_emb_b: embed_dim floats
+  // patch_emb_b: dim floats
   enc->patch_emb_b = (floatx *)(base + *offset);
-  *offset += (size_t)embed_dim * sizeof(floatx);
+  *offset += (size_t)dim * sizeof(floatx);
 
-  // pos_embedding: linear (embed_dim -> n_patches)
-  mmap_qtensor(&enc->pos_embedding, base, offset, embed_dim, n_patches, quant);
+  // pos_embedding: linear (dim -> n_patches)
+  mmap_qtensor(&enc->pos_embedding, base, offset, dim, n_patches, quant);
 
   // layers array
-  enc->layers.resize(vcfg->n_layers);
+  enc->layers.resize(vcfg->nl);
 
   for (auto &layer : enc->layers)
   {
 
     // n1, n1_b
     layer.n1 = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
     layer.n1_b = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
 
-    // attention weights: wq, wk, wv, wo (linear embed_dim -> embed_dim)
-    mmap_qtensor(&layer.wq, base, offset, embed_dim, embed_dim, quant);
-    mmap_qtensor(&layer.wk, base, offset, embed_dim, embed_dim, quant);
-    mmap_qtensor(&layer.wv, base, offset, embed_dim, embed_dim, quant);
-    mmap_qtensor(&layer.wo, base, offset, embed_dim, embed_dim, quant);
+    // attention weights: wq, wk, wv, wo (linear dim -> dim)
+    mmap_qtensor(&layer.wq, base, offset, dim, dim, quant);
+    mmap_qtensor(&layer.wk, base, offset, dim, dim, quant);
+    mmap_qtensor(&layer.wv, base, offset, dim, dim, quant);
+    mmap_qtensor(&layer.wo, base, offset, dim, dim, quant);
 
     // attention biases: bq, bk, bv, bo
     layer.bq = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
     layer.bk = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
     layer.bv = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
     layer.bo = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
 
     // n2, n2_b
     layer.n2 = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
     layer.n2_b = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
 
-    // feedforward weights: w1 (embed_dim -> mlp_dim), w2 (mlp_dim -> embed_dim)
-    mmap_qtensor(&layer.w1, base, offset, embed_dim, mlp_dim, quant);
-    mmap_qtensor(&layer.w2, base, offset, mlp_dim, embed_dim, quant);
+    // feedforward weights: w1 (dim -> mlp_dim), w2 (mlp_dim -> dim)
+    mmap_qtensor(&layer.w1, base, offset, dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w2, base, offset, mlp_dim, dim, quant);
 
-    // feedforward biases: b1 (mlp_dim), b2 (embed_dim)
+    // feedforward biases: b1 (mlp_dim), b2 (dim)
     layer.b1 = (floatx *)(base + *offset);
     *offset += (size_t)mlp_dim * sizeof(floatx);
     layer.b2 = (floatx *)(base + *offset);
-    *offset += (size_t)embed_dim * sizeof(floatx);
+    *offset += (size_t)dim * sizeof(floatx);
 
   }
 
   // post_norm, post_norm_b
   enc->post_norm = (floatx *)(base + *offset);
-  *offset += (size_t)embed_dim * sizeof(floatx);
+  *offset += (size_t)dim * sizeof(floatx);
   enc->post_norm_b = (floatx *)(base + *offset);
-  *offset += (size_t)embed_dim * sizeof(floatx);
+  *offset += (size_t)dim * sizeof(floatx);
 
   // norm
   enc->norm = (floatx *)(base + *offset);
-  *offset += (size_t)embed_dim * sizeof(floatx);
+  *offset += (size_t)dim * sizeof(floatx);
 
-  // proj: linear (embed_dim -> embed_dim)
-  mmap_qtensor(&enc->proj, base, offset, embed_dim, tcfg->embed_dim, quant);
+  // proj: linear (dim -> dim)
+  mmap_qtensor(&enc->proj, base, offset, dim, tcfg->dim, quant);
 
   return enc.release();
 
@@ -1904,17 +1904,17 @@ read_gemma_model(const char *filename, bool enable_mm)
 
 struct VisionBuffer
 {
-  std::vector<int8_t> x_i8;        // (n_patches, embed_dim)
+  std::vector<int8_t> x_i8;        // (n_patches, dim)
   std::vector<floatx> x_scales;    // (n_patches,)
   std::vector<int8_t> mlp_i8;      // (n_patches, mlp_dim)
   std::vector<floatx> mlp_scales;  // (n_patches)
 
-  std::vector<floatx> x;           // (n_patches, embed_dim)
-  std::vector<floatx> resid;       // (n_patches, embed_dim)
-  std::vector<floatx> xq;          // (n_patches, embed_dim)
-  std::vector<floatx> xk;          // (n_patches, embed_dim)
-  std::vector<floatx> xv;          // (n_patches, embed_dim)
-  std::vector<floatx> att_out;     // (n_patches, embed_dim)
+  std::vector<floatx> x;           // (n_patches, dim)
+  std::vector<floatx> resid;       // (n_patches, dim)
+  std::vector<floatx> xq;          // (n_patches, dim)
+  std::vector<floatx> xk;          // (n_patches, dim)
+  std::vector<floatx> xv;          // (n_patches, dim)
+  std::vector<floatx> att_out;     // (n_patches, dim)
   std::vector<floatx> mlp_hidden;  // (n_patches, mlp_dim)
   std::vector<floatx> scores;      // (n_heads, n_patches, n_patches)
 
@@ -1926,21 +1926,21 @@ get_vision_buffer_size(VisionConfig *vcfg, bool quant)
 {
   size_t size = 0;
 
-  int ppi       = vcfg->image_size / vcfg->patch_size;
+  int ppi       = vcfg->img_px / vcfg->psize;
   int n_patches = ppi * ppi;
 
   // Quantized buffers
   if (quant)
   {
     size += n_patches * (
-      sizeof(int8_t) * (vcfg->hidden_dim + vcfg->mlp_dim) +  // x_i8 & mlp_i8
+      sizeof(int8_t) * (vcfg->dim + vcfg->mlp_dim) +  // x_i8 & mlp_i8
       sizeof(floatx) * 2  // x_scales & mlp_scales
     );
   }
 
   // Main buffers
   size += n_patches * sizeof(floatx) * (
-    vcfg->hidden_dim * 6 +     // x & resid & xq & xk & xv & att_out
+    vcfg->dim * 6 +     // x & resid & xq & xk & xv & att_out
     vcfg->mlp_dim +            // mlp_hidden
     n_patches * vcfg->n_heads  // scores
   );
@@ -1951,8 +1951,8 @@ get_vision_buffer_size(VisionConfig *vcfg, bool quant)
 /* */
 VisionBuffer::VisionBuffer(const VisionConfig &vcfg, bool quant)
 {
-  size_t embed_dim = (size_t)vcfg.hidden_dim;
-  size_t ppi = (size_t)vcfg.image_size / vcfg.patch_size;
+  size_t dim = (size_t)vcfg.dim;
+  size_t ppi = (size_t)vcfg.img_px / vcfg.psize;
   size_t n_patches = ppi * ppi;
   size_t mlp_dim = (size_t)vcfg.mlp_dim;
   size_t n_heads = (size_t)vcfg.n_heads;
@@ -1960,18 +1960,18 @@ VisionBuffer::VisionBuffer(const VisionConfig &vcfg, bool quant)
   if (quant)
   {
     // Quantization buffers
-    x_i8.resize(n_patches * embed_dim);
+    x_i8.resize(n_patches * dim);
     mlp_i8.resize(n_patches * mlp_dim);
     x_scales.resize(n_patches);
     mlp_scales.resize(n_patches);
   }
 
-  x.resize(n_patches * embed_dim);
-  resid.resize(n_patches * embed_dim);
-  xq.resize(n_patches * embed_dim);
-  xk.resize(n_patches * embed_dim);
-  xv.resize(n_patches * embed_dim);
-  att_out.resize(n_patches * embed_dim);
+  x.resize(n_patches * dim);
+  resid.resize(n_patches * dim);
+  xq.resize(n_patches * dim);
+  xk.resize(n_patches * dim);
+  xv.resize(n_patches * dim);
+  att_out.resize(n_patches * dim);
   mlp_hidden.resize(n_patches * mlp_dim);
   scores.resize(n_heads * n_patches * n_patches);
 }
@@ -1982,33 +1982,33 @@ struct TextBuffer
   int cache_len;
 
   // Temporary quantized activations (when quant=true)
-  std::vector<int8_t> x_i8;       // ([n_tokens], embed_dim,)
+  std::vector<int8_t> x_i8;       // ([n_tokens], dim,)
   std::vector<floatx> x_scales;   // ([n_tokens],)
-  std::vector<int8_t> xo_i8;      // (n_heads, [n_tokens], head_dim)
+  std::vector<int8_t> xo_i8;      // (n_heads, [n_tokens], hdim)
   std::vector<floatx> xo_scales;  // ([n_tokens],)
   std::vector<int8_t> xg_i8;      // ([n_tokens], mlp_dim,)
   std::vector<floatx> xg_scales;  // ([n_tokens],)
 
   // Pre-computed cos/sin for RoPE
-  std::vector<floatx> csfreqs_slid;  // ([n_tokens], head_dim / 2, 2)
-  std::vector<floatx> csfreqs_full;  // ([n_tokens], head_dim / 2, 2)
+  std::vector<floatx> csfreqs_slid;  // ([n_tokens], hdim / 2, 2)
+  std::vector<floatx> csfreqs_full;  // ([n_tokens], hdim / 2, 2)
 
   // Residual stream
-  std::vector<floatx> x;      // ([n_tokens], embed_dim,)
-  std::vector<floatx> resid;  // ([n_tokens], embed_dim,)
+  std::vector<floatx> x;      // ([n_tokens], dim,)
+  std::vector<floatx> resid;  // ([n_tokens], dim,)
 
   // Attention buffers
-  std::vector<floatx> xq;        // (n_heads, [n_tokens], head_dim)
-  std::vector<floatx> xk;        // (n_kv_heads, [n_tokens], head_dim)
-  std::vector<floatx> xv;        // (n_kv_heads, head_dim, [n_tokens])
-  std::vector<floatx> xo;        // ([n_tokens], n_heads, head_dim)
+  std::vector<floatx> xq;        // (n_heads, [n_tokens], hdim)
+  std::vector<floatx> xk;        // (nkv, [n_tokens], hdim)
+  std::vector<floatx> xv;        // (nkv, hdim, [n_tokens])
+  std::vector<floatx> xo;        // ([n_tokens], n_heads, hdim)
   std::vector<floatx> att;       // (n_heads, [n_tokens], cache_len)
-  std::vector<floatx> kv_cache;  // (n_layers, 2, n_kv_heads, cache_len, head_dim)
+  std::vector<floatx> kv_cache;  // (nl, 2, nkv, cache_len, hdim)
 
   // MLP buffers
   std::vector<floatx> xg;      // ([n_tokens], mlp_dim,)
   std::vector<floatx> xu;      // ([n_tokens], mlp_dim,)
-  std::vector<floatx> logits;  // (vocab_size,)
+  std::vector<floatx> logits;  // (nvocab,)
   TextBuffer(const TextConfig &tcfg, bool multimodal, int cache_len,
 	     int chunk_size, bool use_mm, bool quant);
 };
@@ -2025,28 +2025,28 @@ get_text_buffer_size(
 )
 {
   size_t size    = 0;
-  int    q_size  = tcfg->n_heads * tcfg->head_dim;
-  int    kv_size = tcfg->n_kv_heads * tcfg->head_dim;
-  int    ppi     = vcfg->image_size / vcfg->patch_size;
+  int    q_size  = tcfg->n_heads * tcfg->hdim;
+  int    kv_size = tcfg->nkv * tcfg->hdim;
+  int    ppi     = vcfg->img_px / vcfg->psize;
   int    mult    = use_mm ? std::max(ppi * ppi, chunk_size) : chunk_size;
 
   // Quantized buffers
   if (quant)
   {
     // x_i8 & xo_i8 & xg_i8
-    size += sizeof(int8_t) * (tcfg->embed_dim + q_size + tcfg->mlp_dim);
+    size += sizeof(int8_t) * (tcfg->dim + q_size + tcfg->mlp_dim);
   }
 
   // Main buffers
   size += sizeof(floatx) * (
-    tcfg->n_layers * 2 * cache_len * kv_size +  // kv_cache
-    tcfg->vocab_size +                          // logits
-    mult * tcfg->embed_dim +                    // x
-    mult * tcfg->embed_dim +                    // resid
+    tcfg->nl * 2 * cache_len * kv_size +  // kv_cache
+    tcfg->nvocab +                          // logits
+    mult * tcfg->dim +                    // x
+    mult * tcfg->dim +                    // resid
     mult * q_size +                             // xq
     mult * kv_size +                            // xk
-    mult * tcfg->head_dim +                     // csfreqs_slid
-    mult * tcfg->head_dim +                     // csfreqs_full
+    mult * tcfg->hdim +                     // csfreqs_slid
+    mult * tcfg->hdim +                     // csfreqs_full
     mult * kv_size +                            // xv
     mult * q_size +                             // xo
     mult * tcfg->n_heads * cache_len +          // att
@@ -2067,26 +2067,26 @@ TextBuffer::TextBuffer(
   bool          quant
 ) : cache_len(cache_len)
 {
-  int embed_dim = tcfg.embed_dim;
-  int n_layers = tcfg.n_layers;
-  int head_dim = tcfg.head_dim;
+  int dim = tcfg.dim;
+  int nl = tcfg.nl;
+  int hdim = tcfg.hdim;
   int n_heads = tcfg.n_heads;
   int mlp_dim = tcfg.mlp_dim;
-  int q_size = n_heads * head_dim;
-  int kv_size = tcfg.n_kv_heads * head_dim;
+  int q_size = n_heads * hdim;
+  int kv_size = tcfg.nkv * hdim;
   int mult = chunk_size;
-  kv_cache.resize((size_t)n_layers * 2 * (size_t)cache_len * (size_t)kv_size);
-  logits.resize(tcfg.vocab_size);
+  kv_cache.resize((size_t)nl * 2 * (size_t)cache_len * (size_t)kv_size);
+  logits.resize(tcfg.nvocab);
   // Multimodal models need space for a whole image worth of tokens
   if (use_mm && multimodal)
   {
-    mult = std::max<int>(mult, tcfg.image_toks);
+    mult = std::max<int>(mult, tcfg.img_tok);
   }
 
   if (quant)
   {
     // Quantization buffers
-    x_i8.resize(mult * embed_dim);
+    x_i8.resize(mult * dim);
     xo_i8.resize(mult * q_size);
     xg_i8.resize(mult * mlp_dim);
     x_scales.resize(mult);
@@ -2094,12 +2094,12 @@ TextBuffer::TextBuffer(
     xg_scales.resize(mult);
   }
 
-  x.resize(mult * embed_dim);
-  resid.resize(mult * embed_dim);
+  x.resize(mult * dim);
+  resid.resize(mult * dim);
   xq.resize(mult * q_size);
   xk.resize(mult * kv_size);
-  csfreqs_slid.resize(mult * head_dim);
-  csfreqs_full.resize(mult * head_dim);
+  csfreqs_slid.resize(mult * hdim);
+  csfreqs_full.resize(mult * hdim);
   xv.resize(mult * kv_size);
   xo.resize(mult * q_size);
   att.resize(mult * n_heads * cache_len);
@@ -3384,7 +3384,7 @@ softmax(floatx *dst, const floatx *src, int dim)
 
 /* */
 std::vector<floatx>
-prepare_image(const std::string &path, int image_size)
+prepare_image(const std::string &path, int img_px)
 {
   int rows, cols, channels;
   std::unique_ptr<unsigned char, decltype(&stbi_image_free)> raw(
@@ -3396,10 +3396,10 @@ prepare_image(const std::string &path, int image_size)
     return {};
   }
 
-  size_t count = (size_t)image_size * image_size * 3;
+  size_t count = (size_t)img_px * img_px * 3;
   std::vector<unsigned char> resized(count);
   if (!stbir_resize(
-        raw.get(), cols, rows, 0, resized.data(), image_size, image_size, 0,
+        raw.get(), cols, rows, 0, resized.data(), img_px, img_px, 0,
         STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_CATMULLROM
       ))
     return {};
@@ -3416,7 +3416,7 @@ prepare_image(const std::string &path, int image_size)
 std::vector<floatx>
 prepare_longimage(
   const std::string &path,
-  int         image_size,
+  int         img_px,
   int         min_crop_size,
   int         max_crops,
   int        *n_crops
@@ -3430,7 +3430,7 @@ prepare_longimage(
   int hn_crops = 0;
   int cw = 0, ch = 0;
 
-  size_t epi = (size_t)image_size * image_size * 3;  // Elements per image
+  size_t epi = (size_t)img_px * img_px * 3;  // Elements per image
 
   *n_crops = 0;
 
@@ -3480,7 +3480,7 @@ prepare_longimage(
 
   // The first entry represents the full image (resized)
   rsz_r = (unsigned char *)stbir_resize(
-    raw.get(), cols, rows, cols * 3, rsz.data(), image_size, image_size, 0, STBIR_RGB,
+    raw.get(), cols, rows, cols * 3, rsz.data(), img_px, img_px, 0, STBIR_RGB,
     STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_CATMULLROM
   );
   if (rsz_r == NULL) return {};
@@ -3507,7 +3507,7 @@ prepare_longimage(
       unsigned char *raw_crop = raw.get() + ((size_t)py * cols + px) * 3;
 
       rsz_r = static_cast<unsigned char*>(stbir_resize(
-        raw_crop, pw, ph, cols * 3, rsz_crop, image_size, image_size, 0,
+        raw_crop, pw, ph, cols * 3, rsz_crop, img_px, img_px, 0,
         STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_CATMULLROM
       ));
       if (rsz_r == NULL) return {};
@@ -3530,31 +3530,31 @@ NO_FAST_MATH_BEGIN;
 
 /**
  * Vision forward pass (SigLIP)
- * img: (image_size, image_size, 3)
+ * img: (img_px, img_px, 3)
  */
 int
 forward_vision(
   VisionEncoder *enc,
-  TextConfig    *tcfg,
-  TextBuffer    *tbuf,
-  VisionBuffer  *vbuf,
+  TextConfig    *tc,
+  TextBuffer    *tb,
+  VisionBuffer  *vb,
   const floatx  *img,
   bool           quant
 )
 {
   VisionConfig *vcfg = &enc->config;
 
-  int embed_dim   = vcfg->hidden_dim;
-  int patch_size  = vcfg->patch_size;
-  int image_size  = vcfg->image_size;
-  int ppi         = image_size / patch_size;
+  int dim   = vcfg->dim;
+  int psize  = vcfg->psize;
+  int img_px  = vcfg->img_px;
+  int ppi         = img_px / psize;
   int n_patches   = ppi * ppi;
-  int image_toks  = tcfg->image_toks;
-  int side_len    = (int)roundf(sqrtf((float)image_toks));
-  int kernel_size = (image_size / vcfg->patch_size) / side_len;
-  int head_dim    = embed_dim / vcfg->n_heads;
+  int img_tok  = tc->img_tok;
+  int side_len    = (int)roundf(sqrtf((float)img_tok));
+  int kernel_size = (img_px / vcfg->psize) / side_len;
+  int hdim    = dim / vcfg->n_heads;
   int mlp_dim     = vcfg->mlp_dim;
-  int input_dim   = 3 * patch_size * patch_size;
+  int input_dim   = 3 * psize * psize;
 
   // Patch Embedding
 
@@ -3569,30 +3569,30 @@ forward_vision(
       int patch_idx = oy * ppi + ox;
 
       // Compute the embed vector for the current patch
-      for (int oc = 0; oc < embed_dim; oc++)
+      for (int oc = 0; oc < dim; oc++)
       {
         float sum = 0.0f;
 
         // equivalent to Conv2d(
-        //   in_channels=3, out_channels=embed_dim, kernel_size=patch_size,
-        //   stride=patch_size, bias=True)
+        //   in_channels=3, out_channels=dim, kernel_size=psize,
+        //   stride=psize, bias=True)
 
-        for (int py = 0; py < patch_size; py++)
-          for (int px = 0; px < patch_size; px++)
+        for (int py = 0; py < psize; py++)
+          for (int px = 0; px < psize; px++)
             for (int c = 0; c < 3; c++)
             {
-              // img[c, oy*patch_size + py, ox*patch_size + px]
+              // img[c, oy*psize + py, ox*psize + px]
               int in_idx =
-                ((oy * patch_size + py) * image_size + (ox * patch_size + px)) *
+                ((oy * psize + py) * img_px + (ox * psize + px)) *
                   3 +
                 c;
               // patch_emb[oc, c, py, px]
-              int w_idx = oc * input_dim + c * patch_size * patch_size +
-                          py * patch_size + px;
+              int w_idx = oc * input_dim + c * psize * psize +
+                          py * psize + px;
               sum += (float)enc->patch_emb[w_idx] * (float)img[in_idx];
             }
 
-        vbuf->x[patch_idx * embed_dim + oc] =
+        vb->x[patch_idx * dim + oc] =
           clamp_fpx((floatx)(sum + (float)enc->patch_emb_b[oc]));
       }
     }
@@ -3602,21 +3602,21 @@ forward_vision(
   // Position Embedding
   if (!quant)
   {
-    for (int d = 0; d < n_patches * embed_dim; d++)
+    for (int d = 0; d < n_patches * dim; d++)
     {
-      vbuf->x[d] = clamp_fpx(vbuf->x[d] + enc->pos_embedding.fpx[d]);
+      vb->x[d] = clamp_fpx(vb->x[d] + enc->pos_embedding.fpx[d]);
     }
   }
   else
   {
     // Dequantize per row
     for (int i = 0; i < n_patches; i++)
-      for (int j = 0; j < embed_dim; j++)
+      for (int j = 0; j < dim; j++)
       {
         float scale = (float)enc->pos_embedding.i8.scales[i];
-        float val = (float)enc->pos_embedding.i8.q[i * embed_dim + j] * scale;
-        vbuf->x[i * embed_dim + j] =
-          clamp_fpx(vbuf->x[i * embed_dim + j] + (floatx)val);
+        float val = (float)enc->pos_embedding.i8.q[i * dim + j] * scale;
+        vb->x[i * dim + j] =
+          clamp_fpx(vb->x[i * dim + j] + (floatx)val);
       }
   }
 
@@ -3626,14 +3626,14 @@ forward_vision(
   for (auto &layer : enc->layers)
   {
 
-    memcpy(vbuf->resid.data(), vbuf->x.data(), n_patches * embed_dim * sizeof(floatx));
+    memcpy(vb->resid.data(), vb->x.data(), n_patches * dim * sizeof(floatx));
 
     int i;
     #pragma omp parallel for private(i) OMP_PARA_ARGS
     for (i = 0; i < n_patches; i++)
     {
-      floatx *row = vbuf->x.data() + i * embed_dim;
-      layernorm(row, row, layer.n1, layer.n1_b, embed_dim, vcfg->eps);
+      floatx *row = vb->x.data() + i * dim;
+      layernorm(row, row, layer.n1, layer.n1_b, dim, vcfg->eps);
     }
     if (is_interrupted()) return 1;
 
@@ -3641,35 +3641,35 @@ forward_vision(
     if (!quant)
     {
       if (gemm_fpx(
-            vbuf->xq.data(), 0, layer.wq.fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
-            embed_dim, true
+            vb->xq.data(), 0, layer.wq.fpx, 0, vb->x.data(), 0, n_patches, dim,
+            dim, true
           ) == 1 ||
           gemm_fpx(
-            vbuf->xk.data(), 0, layer.wk.fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
-            embed_dim, true
+            vb->xk.data(), 0, layer.wk.fpx, 0, vb->x.data(), 0, n_patches, dim,
+            dim, true
           ) == 1 ||
           gemm_fpx(
-            vbuf->xv.data(), 0, layer.wv.fpx, 0, vbuf->x.data(), 0, n_patches, embed_dim,
-            embed_dim, true
+            vb->xv.data(), 0, layer.wv.fpx, 0, vb->x.data(), 0, n_patches, dim,
+            dim, true
           ) == 1)
         return 1;
     }
     else
     {
       quantize_acts(
-        vbuf->x_i8.data(), vbuf->x_scales.data(), vbuf->x.data(), 0, n_patches, embed_dim, true
+        vb->x_i8.data(), vb->x_scales.data(), vb->x.data(), 0, n_patches, dim, true
       );
       if (gemm_int8(
-            vbuf->xq.data(), 0, layer.wq.i8.q, 0, layer.wq.i8.scales, vbuf->x_i8.data(),
-            0, vbuf->x_scales.data(), n_patches, embed_dim, embed_dim, true
+            vb->xq.data(), 0, layer.wq.i8.q, 0, layer.wq.i8.scales, vb->x_i8.data(),
+            0, vb->x_scales.data(), n_patches, dim, dim, true
           ) == 1 ||
           gemm_int8(
-            vbuf->xk.data(), 0, layer.wk.i8.q, 0, layer.wk.i8.scales, vbuf->x_i8.data(),
-            0, vbuf->x_scales.data(), n_patches, embed_dim, embed_dim, true
+            vb->xk.data(), 0, layer.wk.i8.q, 0, layer.wk.i8.scales, vb->x_i8.data(),
+            0, vb->x_scales.data(), n_patches, dim, dim, true
           ) == 1 ||
           gemm_int8(
-            vbuf->xv.data(), 0, layer.wv.i8.q, 0, layer.wv.i8.scales, vbuf->x_i8.data(),
-            0, vbuf->x_scales.data(), n_patches, embed_dim, embed_dim, true
+            vb->xv.data(), 0, layer.wv.i8.q, 0, layer.wv.i8.scales, vb->x_i8.data(),
+            0, vb->x_scales.data(), n_patches, dim, dim, true
           ) == 1)
         return 1;
     }
@@ -3677,18 +3677,18 @@ forward_vision(
 
     // Add biases
     for (int i = 0; i < n_patches; i++)
-      for (int j = 0; j < embed_dim; j++)
+      for (int j = 0; j < dim; j++)
       {
-        int idx = i * embed_dim + j;
-        vbuf->xq[idx] += layer.bq[j];
-        vbuf->xk[idx] += layer.bk[j];
-        vbuf->xv[idx] += layer.bv[j];
+        int idx = i * dim + j;
+        vb->xq[idx] += layer.bq[j];
+        vb->xk[idx] += layer.bk[j];
+        vb->xv[idx] += layer.bv[j];
       }
     if (is_interrupted()) return 1;
 
     // Attention
-    memset(vbuf->att_out.data(), 0, n_patches * embed_dim * sizeof(floatx));
-    float scale = 1.0f / sqrtf((float)head_dim);
+    memset(vb->att_out.data(), 0, n_patches * dim * sizeof(floatx));
+    float scale = 1.0f / sqrtf((float)hdim);
 
     int  h;
     bool quit = false;
@@ -3697,14 +3697,14 @@ forward_vision(
     for (h = 0; h < vcfg->n_heads; h++)
     {
       floatx *scores =
-        vbuf->scores.data() +
+        vb->scores.data() +
         h * n_patches * n_patches;  // (n_patches, n_patches) for this head
 
       // scores = Q @ K^T * scale
       if (gemm_fpx(
-            scores, /*dst_stride=*/n_patches, vbuf->xk.data() + h * head_dim,
-            /*mat_stride=*/embed_dim, vbuf->xq.data() + h * head_dim,
-            /*src_stride=*/embed_dim, n_patches, n_patches, head_dim, false
+            scores, /*dst_stride=*/n_patches, vb->xk.data() + h * hdim,
+            /*mat_stride=*/dim, vb->xq.data() + h * hdim,
+            /*src_stride=*/dim, n_patches, n_patches, hdim, false
           ) == 1)
         quit = true;
 
@@ -3721,10 +3721,10 @@ forward_vision(
 
       // Weighted sum of values: out = scores @ V
       gemm_fpx_nn(
-        vbuf->att_out.data() + h * head_dim, /*dst_stride=*/embed_dim,
-        vbuf->xv.data() + h * head_dim,
-        /*mat_stride=*/embed_dim, scores, /*src_stride=*/n_patches, n_patches,
-        head_dim, n_patches, false
+        vb->att_out.data() + h * hdim, /*dst_stride=*/dim,
+        vb->xv.data() + h * hdim,
+        /*mat_stride=*/dim, scores, /*src_stride=*/n_patches, n_patches,
+        hdim, n_patches, false
       );
     }
     if (quit || is_interrupted()) return 1;
@@ -3733,19 +3733,19 @@ forward_vision(
     if (!quant)
     {
       if (gemm_fpx(
-            vbuf->x.data(), 0, layer.wo.fpx, 0, vbuf->att_out.data(), 0, n_patches,
-            embed_dim, embed_dim, true
+            vb->x.data(), 0, layer.wo.fpx, 0, vb->att_out.data(), 0, n_patches,
+            dim, dim, true
           ) == 1)
         return 1;
     }
     else
     {
       quantize_acts(
-        vbuf->x_i8.data(), vbuf->x_scales.data(), vbuf->att_out.data(), 0, n_patches, embed_dim, true
+        vb->x_i8.data(), vb->x_scales.data(), vb->att_out.data(), 0, n_patches, dim, true
       );
       if (gemm_int8(
-            vbuf->x.data(), 0, layer.wo.i8.q, 0, layer.wo.i8.scales, vbuf->x_i8.data(), 0,
-            vbuf->x_scales.data(), n_patches, embed_dim, embed_dim, true
+            vb->x.data(), 0, layer.wo.i8.q, 0, layer.wo.i8.scales, vb->x_i8.data(), 0,
+            vb->x_scales.data(), n_patches, dim, dim, true
           ) == 1)
         return 1;
     }
@@ -3753,26 +3753,26 @@ forward_vision(
 
     // Add output bias
     for (int i = 0; i < n_patches; i++)
-      for (int j = 0; j < embed_dim; j++)
+      for (int j = 0; j < dim; j++)
       {
-        vbuf->x[i * embed_dim + j] += layer.bo[j];
+        vb->x[i * dim + j] += layer.bo[j];
       }
     if (is_interrupted()) return 1;
 
     // Residual connection
-    for (int i = 0; i < n_patches * embed_dim; i++)
+    for (int i = 0; i < n_patches * dim; i++)
     {
-      vbuf->x[i] = clamp_fpx(vbuf->x[i] + vbuf->resid[i]);
+      vb->x[i] = clamp_fpx(vb->x[i] + vb->resid[i]);
     }
     if (is_interrupted()) return 1;
 
-    memcpy(vbuf->resid.data(), vbuf->x.data(), n_patches * embed_dim * sizeof(floatx));
+    memcpy(vb->resid.data(), vb->x.data(), n_patches * dim * sizeof(floatx));
 
     #pragma omp parallel for private(i) OMP_PARA_ARGS
     for (i = 0; i < n_patches; i++)
     {
-      floatx *row = vbuf->x.data() + i * embed_dim;
-      layernorm(row, row, layer.n2, layer.n2_b, embed_dim, vcfg->eps);
+      floatx *row = vb->x.data() + i * dim;
+      layernorm(row, row, layer.n2, layer.n2_b, dim, vcfg->eps);
     }
     if (is_interrupted()) return 1;
 
@@ -3780,19 +3780,19 @@ forward_vision(
     if (!quant)
     {
       if (gemm_fpx(
-            vbuf->mlp_hidden.data(), 0, layer.w1.fpx, 0, vbuf->x.data(), 0, n_patches,
-            mlp_dim, embed_dim, true
+            vb->mlp_hidden.data(), 0, layer.w1.fpx, 0, vb->x.data(), 0, n_patches,
+            mlp_dim, dim, true
           ) == 1)
         return 1;
     }
     else
     {
       quantize_acts(
-        vbuf->x_i8.data(), vbuf->x_scales.data(), vbuf->x.data(), 0, n_patches, embed_dim, true
+        vb->x_i8.data(), vb->x_scales.data(), vb->x.data(), 0, n_patches, dim, true
       );
       if (gemm_int8(
-            vbuf->mlp_hidden.data(), 0, layer.w1.i8.q, 0, layer.w1.i8.scales,
-            vbuf->x_i8.data(), 0, vbuf->x_scales.data(), n_patches, mlp_dim, embed_dim, true
+            vb->mlp_hidden.data(), 0, layer.w1.i8.q, 0, layer.w1.i8.scales,
+            vb->x_i8.data(), 0, vb->x_scales.data(), n_patches, mlp_dim, dim, true
           ) == 1)
         return 1;
     }
@@ -3803,12 +3803,12 @@ forward_vision(
       {
         // Apply fc1 biases
         float val =
-          (float)vbuf->mlp_hidden[i * mlp_dim + j] + (float)layer.b1[j];
+          (float)vb->mlp_hidden[i * mlp_dim + j] + (float)layer.b1[j];
         // GELU tanh approximation
         float c = 0.79788456080287f;
         val =
           0.5f * val * (1.0f + tanhf(c * (val + 0.044715f * val * val * val)));
-        vbuf->mlp_hidden[i * mlp_dim + j] = (floatx)val;
+        vb->mlp_hidden[i * mlp_dim + j] = (floatx)val;
       }
     if (is_interrupted()) return 1;
 
@@ -3816,20 +3816,20 @@ forward_vision(
     if (!quant)
     {
       if (gemm_fpx(
-            vbuf->x.data(), 0, layer.w2.fpx, 0, vbuf->mlp_hidden.data(), 0, n_patches,
-            embed_dim, mlp_dim, true
+            vb->x.data(), 0, layer.w2.fpx, 0, vb->mlp_hidden.data(), 0, n_patches,
+            dim, mlp_dim, true
           ) == 1)
         return 1;
     }
     else
     {
       quantize_acts(
-        vbuf->mlp_i8.data(), vbuf->mlp_scales.data(), vbuf->mlp_hidden.data(), 0, n_patches, mlp_dim,
+        vb->mlp_i8.data(), vb->mlp_scales.data(), vb->mlp_hidden.data(), 0, n_patches, mlp_dim,
         true
       );
       if (gemm_int8(
-            vbuf->x.data(), 0, layer.w2.i8.q, 0, layer.w2.i8.scales, vbuf->mlp_i8.data(),
-            0, vbuf->mlp_scales.data(), n_patches, embed_dim, mlp_dim, true
+            vb->x.data(), 0, layer.w2.i8.q, 0, layer.w2.i8.scales, vb->mlp_i8.data(),
+            0, vb->mlp_scales.data(), n_patches, dim, mlp_dim, true
           ) == 1)
         return 1;
     }
@@ -3837,43 +3837,43 @@ forward_vision(
 
     // x += b2
     for (int i = 0; i < n_patches; i++)
-      for (int j = 0; j < embed_dim; j++)
+      for (int j = 0; j < dim; j++)
       {
-        vbuf->x[i * embed_dim + j] += layer.b2[j];
+        vb->x[i * dim + j] += layer.b2[j];
       }
 
     if (is_interrupted()) return 1;
 
     // Residual connection
     #pragma omp parallel for private(i) OMP_PARA_ARGS
-    for (i = 0; i < n_patches * embed_dim; i++)
+    for (i = 0; i < n_patches * dim; i++)
     {
-      vbuf->x[i] = clamp_fpx(vbuf->x[i] + vbuf->resid[i]);
+      vb->x[i] = clamp_fpx(vb->x[i] + vb->resid[i]);
     }
     if (is_interrupted()) return 1;
   }
 
-  // Post-norm + average pooling down to image_toks tokens
+  // Post-norm + average pooling down to img_tok tokens
   int i;
   #pragma omp parallel for private(i) OMP_PARA_ARGS
   for (i = 0; i < n_patches; i++)
   {
-    floatx *row = vbuf->x.data() + i * embed_dim;
-    layernorm(row, row, enc->post_norm, enc->post_norm_b, embed_dim, vcfg->eps);
+    floatx *row = vb->x.data() + i * dim;
+    layernorm(row, row, enc->post_norm, enc->post_norm_b, dim, vcfg->eps);
   }
   if (is_interrupted()) return 1;
 
   // Average pooling (AvgPool2d(kernel_size=K, stride=K))
 
   /* Be careful that this loop must remain serial, in-place pooling writes
-   * results to the front of vbuf->x.data(), which overlaps with input data needed by
+   * results to the front of vb->x.data(), which overlaps with input data needed by
    * other output positions. Parallelizing this loop introduces a read/write
    * race condition. */
   for (int oy = 0; oy < side_len; oy++)
     for (int ox = 0; ox < side_len; ox++)
     {
-      int out_idx = (oy * side_len + ox) * embed_dim;
-      for (int d = 0; d < embed_dim; d++)
+      int out_idx = (oy * side_len + ox) * dim;
+      for (int d = 0; d < dim; d++)
       {
         float sum = 0.0f;
         for (int ky = 0; ky < kernel_size; ky++)
@@ -3882,41 +3882,41 @@ forward_vision(
           {
             int py        = oy * kernel_size + ky;
             int px        = ox * kernel_size + kx;
-            int token_idx = (py * ppi + px) * embed_dim + d;
-            sum += (float)vbuf->x[token_idx];
+            int token_idx = (py * ppi + px) * dim + d;
+            sum += (float)vb->x[token_idx];
           }
         }
-        vbuf->x[out_idx + d] = (floatx)(sum / (kernel_size * kernel_size));
+        vb->x[out_idx + d] = (floatx)(sum / (kernel_size * kernel_size));
       }
     }
 
   if (is_interrupted()) return 1;
-  // tbuf->x.data() now becomes (image_toks, embed_dim)
+  // tb->x.data() now becomes (img_tok, dim)
 
   // Final RMSNorm
-  std::mdspan v_x(vbuf->x.data(), image_toks, embed_dim);
+  std::mdspan v_x(vb->x.data(), img_tok, dim);
   rmsnorm(v_x, v_x, enc->norm, vcfg->eps);
   if (is_interrupted()) return 1;
 
   // Final projection into language model embedding space
-  // x (image_toks, embed_dim) = x (image_toks, embed_dim)
-  //                           @ proj (embed_dim, embed_dim)
+  // x (img_tok, dim) = x (img_tok, dim)
+  //                           @ proj (dim, dim)
   if (!quant)
   {
     if (gemm_fpx(
-          tbuf->x.data(), 0, enc->proj.fpx, 0, vbuf->x.data(), 0, image_toks,
-          tcfg->embed_dim, embed_dim, true
+          tb->x.data(), 0, enc->proj.fpx, 0, vb->x.data(), 0, img_tok,
+          tc->dim, dim, true
         ) == 1)
       return 1;
   }
   else
   {
     quantize_acts(
-      vbuf->x_i8.data(), vbuf->x_scales.data(), vbuf->x.data(), 0, image_toks, embed_dim, true
+      vb->x_i8.data(), vb->x_scales.data(), vb->x.data(), 0, img_tok, dim, true
     );
     if (gemm_int8(
-          tbuf->x.data(), 0, enc->proj.i8.q, 0, enc->proj.i8.scales, vbuf->x_i8.data(), 0,
-          vbuf->x_scales.data(), image_toks, tcfg->embed_dim, embed_dim, true
+          tb->x.data(), 0, enc->proj.i8.q, 0, enc->proj.i8.scales, vb->x_i8.data(), 0,
+          vb->x_scales.data(), img_tok, tc->dim, dim, true
         ) == 1)
       return 1;
   }
@@ -3928,49 +3928,49 @@ forward_vision(
 /* Language model forward (one token) */
 int
 forward_text_decode(
-  TextDecoder *dec, TextBuffer *tbuf, int pos, bool quant, bool compute_logits
+  TextDecoder *dec, TextBuffer *tb, int pos, bool quant, bool compute_logits
 )
 {
   TextConfig *tcfg = &dec->config;
 
-  int embed_dim  = tcfg->embed_dim;
+  int dim  = tcfg->dim;
   int n_heads    = tcfg->n_heads;
-  int n_kv_heads = tcfg->n_kv_heads;
-  int head_dim   = tcfg->head_dim;
-  int q_size     = n_heads * head_dim;
-  int kv_size    = n_kv_heads * head_dim;
+  int nkv = tcfg->nkv;
+  int hdim   = tcfg->hdim;
+  int q_size     = n_heads * hdim;
+  int kv_size    = nkv * hdim;
 
-  if (pos >= tbuf->cache_len)
+  if (pos >= tb->cache_len)
   {
     log_error("kv cache is full");
     return 1;
   }
 
   // Precompute cos & sin for all frequencies (used in RoPE)
-  for (int d = 0; d < head_dim / 2; d++)
+  for (int d = 0; d < hdim / 2; d++)
   {
     float freq;
-    float e = (float)(-2 * d) / (float)head_dim;  // exponent
+    float e = (float)(-2 * d) / (float)hdim;  // exponent
 
     // Rotation angles for sliding window attentions
-    freq                          = powf(tcfg->local_theta, e);
-    tbuf->csfreqs_slid[d * 2]     = (floatx)cosf(freq * (float)pos);
-    tbuf->csfreqs_slid[d * 2 + 1] = (floatx)sinf(freq * (float)pos);
+    freq                          = powf(tcfg->theta_l, e);
+    tb->csfreqs_slid[d * 2]     = (floatx)cosf(freq * (float)pos);
+    tb->csfreqs_slid[d * 2 + 1] = (floatx)sinf(freq * (float)pos);
 
     // Rotation angles for full attentions
-    freq                          = powf(tcfg->global_theta, e);
-    tbuf->csfreqs_full[d * 2]     = (floatx)cosf(freq * (float)pos);
-    tbuf->csfreqs_full[d * 2 + 1] = (floatx)sinf(freq * (float)pos);
+    freq                          = powf(tcfg->theta_g, e);
+    tb->csfreqs_full[d * 2]     = (floatx)cosf(freq * (float)pos);
+    tb->csfreqs_full[d * 2 + 1] = (floatx)sinf(freq * (float)pos);
   }
   if (is_interrupted()) return 1;
 
   // Forward all the layers
-  floatx *layer_cache = tbuf->kv_cache.data();
-  for (auto [layer, is_local] : std::views::zip(dec->layers, tcfg->att_layers))
+  floatx *layer_cache = tb->kv_cache.data();
+  for (auto [layer, is_local] : std::views::zip(dec->layers, tcfg->swa))
   {
-    memcpy(tbuf->resid.data(), tbuf->x.data(), embed_dim * sizeof(*tbuf->x.data()));
+    memcpy(tb->resid.data(), tb->x.data(), dim * sizeof(*tb->x.data()));
 
-    std::mdspan x2_mdspan(tbuf->x.data(), 1, embed_dim);
+    std::mdspan x2_mdspan(tb->x.data(), 1, dim);
     rmsnorm(x2_mdspan, x2_mdspan, layer.n1, tcfg->eps);
     if (is_interrupted()) return 1;
 
@@ -3978,26 +3978,26 @@ forward_text_decode(
     if (!quant)
     {
       gemv_fpx(
-        tbuf->xq.data(), std::mdspan(layer.wq.fpx, q_size, embed_dim), tbuf->x.data(), true
-      );  // (n_heads, head_dim)
-      // (n_kv_heads, head_dim)
-      gemv_fpx(tbuf->xk.data(), std::mdspan(layer.wk.fpx, kv_size, embed_dim), tbuf->x.data(), true);
-      gemv_fpx(tbuf->xv.data(), std::mdspan(layer.wv.fpx, kv_size, embed_dim), tbuf->x.data(), true);
+        tb->xq.data(), std::mdspan(layer.wq.fpx, q_size, dim), tb->x.data(), true
+      );  // (n_heads, hdim)
+      // (nkv, hdim)
+      gemv_fpx(tb->xk.data(), std::mdspan(layer.wk.fpx, kv_size, dim), tb->x.data(), true);
+      gemv_fpx(tb->xv.data(), std::mdspan(layer.wv.fpx, kv_size, dim), tb->x.data(), true);
     }
     else
     {
-      floatx x_scale = quantize_act(tbuf->x_i8.data(), tbuf->x.data(), embed_dim);
+      floatx x_scale = quantize_act(tb->x_i8.data(), tb->x.data(), dim);
       gemv_int8(
-        tbuf->xq.data(), layer.wq.i8.q, layer.wq.i8.scales, tbuf->x_i8.data(), x_scale,
-        q_size, embed_dim, true
+        tb->xq.data(), layer.wq.i8.q, layer.wq.i8.scales, tb->x_i8.data(), x_scale,
+        q_size, dim, true
       );
       gemv_int8(
-        tbuf->xk.data(), layer.wk.i8.q, layer.wk.i8.scales, tbuf->x_i8.data(), x_scale,
-        kv_size, embed_dim, true
+        tb->xk.data(), layer.wk.i8.q, layer.wk.i8.scales, tb->x_i8.data(), x_scale,
+        kv_size, dim, true
       );
       gemv_int8(
-        tbuf->xv.data(), layer.wv.i8.q, layer.wv.i8.scales, tbuf->x_i8.data(), x_scale,
-        kv_size, embed_dim, true
+        tb->xv.data(), layer.wv.i8.q, layer.wv.i8.scales, tb->x_i8.data(), x_scale,
+        kv_size, dim, true
       );
     }
     if (is_interrupted()) return 1;
@@ -4007,15 +4007,15 @@ forward_text_decode(
       // Use the non-threading version here since we are running this over
       // every head
       // Query RMSNorm
-      std::mdspan xq(tbuf->xq.data(), n_heads, head_dim);
+      std::mdspan xq(tb->xq.data(), n_heads, hdim);
       rmsnorm(xq, xq, layer.nq, tcfg->eps);
       // Key RMSNorm
-      std::mdspan xk(tbuf->xk.data(), n_kv_heads, head_dim);
+      std::mdspan xk(tb->xk.data(), nkv, hdim);
       rmsnorm(xk, xk, layer.nk, tcfg->eps);
     }
     if (is_interrupted()) return 1;
 
-    floatx *freqs_cs = is_local ? tbuf->csfreqs_slid.data() : tbuf->csfreqs_full.data();
+    floatx *freqs_cs = is_local ? tb->csfreqs_slid.data() : tb->csfreqs_full.data();
 
     // Apply RoPE to queries & keys
     auto applyRope = [freqs_cs](std::mdspan<floatx, std::dims<2>> data) {
@@ -4033,31 +4033,31 @@ forward_text_decode(
         }
       }
     };
-    applyRope(std::mdspan(tbuf->xq.data(), n_heads, head_dim)); // Apply to queries
-    applyRope(std::mdspan(tbuf->xk.data(), n_kv_heads, head_dim)); // Apply to keys
+    applyRope(std::mdspan(tb->xq.data(), n_heads, hdim)); // Apply to queries
+    applyRope(std::mdspan(tb->xk.data(), nkv, hdim)); // Apply to keys
     if (is_interrupted()) return 1;
 
-    // (n_kv_heads, cache_len, head_dim)
+    // (nkv, cache_len, hdim)
     floatx *k_cache = layer_cache;
-    floatx *v_cache = k_cache + tbuf->cache_len * kv_size;
-    layer_cache += (size_t)2 * tbuf->cache_len * kv_size;
+    floatx *v_cache = k_cache + tb->cache_len * kv_size;
+    layer_cache += (size_t)2 * tb->cache_len * kv_size;
 
     // Write to kv_cache
-    for (int h = 0; h < n_kv_heads; h++)
+    for (int h = 0; h < nkv; h++)
     {
       floatx *xk_head =
-        k_cache + h * tbuf->cache_len * head_dim + pos * head_dim;
+        k_cache + h * tb->cache_len * hdim + pos * hdim;
       floatx *xv_head =
-        v_cache + h * tbuf->cache_len * head_dim + pos * head_dim;
-      memcpy(xk_head, tbuf->xk.data() + h * head_dim, head_dim * sizeof(*tbuf->xk.data()));
-      memcpy(xv_head, tbuf->xv.data() + h * head_dim, head_dim * sizeof(*tbuf->xv.data()));
+        v_cache + h * tb->cache_len * hdim + pos * hdim;
+      memcpy(xk_head, tb->xk.data() + h * hdim, hdim * sizeof(*tb->xk.data()));
+      memcpy(xv_head, tb->xv.data() + h * hdim, hdim * sizeof(*tb->xv.data()));
     }
     if (is_interrupted()) return 1;
 
     // Sliding-window (true) or full attention (false)?
-    bool local_att = is_local && pos >= tcfg->slide_len;
+    bool local_att = is_local && pos >= tcfg->slide;
     // Starting position of kv_cache
-    int spos   = local_att ? (pos + 1 - tcfg->slide_len) : 0;
+    int spos   = local_att ? (pos + 1 - tcfg->slide) : 0;
     int attlen = pos + 1 - spos;  // Include the current pos
 
     floatx att_scale = (floatx)(1.0f / sqrtf((float)tcfg->q_scale));
@@ -4067,29 +4067,29 @@ forward_text_decode(
     #pragma omp parallel for private(h) OMP_PARA_ARGS
     for (h = 0; h < n_heads; h++)
     {
-      int h_kv = h * n_kv_heads / n_heads;  // GQA mapping
+      int h_kv = h * nkv / n_heads;  // GQA mapping
 
-      floatx *xq_head = tbuf->xq.data() + h * head_dim;  // xq[h, :]
+      floatx *xq_head = tb->xq.data() + h * hdim;  // xq[h, :]
       // k_cache[h_kv, spos:, :]
       floatx *xk_head =
-        k_cache + h_kv * tbuf->cache_len * head_dim + spos * head_dim;
+        k_cache + h_kv * tb->cache_len * hdim + spos * hdim;
       // att[h, spos:]
-      floatx *att_head = tbuf->att.data() + h * attlen + spos;
+      floatx *att_head = tb->att.data() + h * attlen + spos;
 
       // Compute dot product of the current query across all the keys
-      gemv_fpx(att_head, std::mdspan(xk_head, attlen, head_dim), xq_head, false);
+      gemv_fpx(att_head, std::mdspan(xk_head, attlen, hdim), xq_head, false);
       for (int t = 0; t < attlen; t++)
       {
         att_head[t] *= att_scale;
       }
 
       // Attention score softcapping
-      if (tcfg->att_softcap != 0.0f)
+      if (tcfg->sc_att != 0.0f)
       {
         for (int t = 0; t < attlen; t++)
         {
-          float val   = (float)att_head[t] / tcfg->att_softcap;
-          att_head[t] = (floatx)(tanhf(val) * tcfg->att_softcap);
+          float val   = (float)att_head[t] / tcfg->sc_att;
+          att_head[t] = (floatx)(tanhf(val) * tcfg->sc_att);
         }
       }
 
@@ -4099,38 +4099,38 @@ forward_text_decode(
       // Compute output as weighted sum of values
       // v_cache[h_kv, spos:, :]
       floatx *xv_head =
-        v_cache + h_kv * tbuf->cache_len * head_dim + spos * head_dim;
-      floatx *xo_head = tbuf->xo.data() + h * head_dim;
+        v_cache + h_kv * tb->cache_len * hdim + spos * hdim;
+      floatx *xo_head = tb->xo.data() + h * hdim;
 
-      // xo_head (head_dim,) = att_head (attlen,) @ xv_head (attlen, head_dim)
-      gemv_fpx_nn(xo_head, att_head, xv_head, 0, attlen, head_dim);
+      // xo_head (hdim,) = att_head (attlen,) @ xv_head (attlen, hdim)
+      gemv_fpx_nn(xo_head, att_head, xv_head, 0, attlen, hdim);
     }
     if (is_interrupted()) return 1;
 
     // Output projection maps xo back to x
-    // x (embed_dim,) = xo (head_dim,) @ wo.T (head_dim, embed_dim)
+    // x (dim,) = xo (hdim,) @ wo.T (hdim, dim)
     if (!quant)
     {
-      gemv_fpx(tbuf->x.data(), std::mdspan(layer.wo.fpx, embed_dim, q_size), tbuf->xo.data(), true);
+      gemv_fpx(tb->x.data(), std::mdspan(layer.wo.fpx, dim, q_size), tb->xo.data(), true);
     }
     else
     {
-      floatx xo_scale = quantize_act(tbuf->xo_i8.data(), tbuf->xo.data(), q_size);
+      floatx xo_scale = quantize_act(tb->xo_i8.data(), tb->xo.data(), q_size);
       gemv_int8(
-        tbuf->x.data(), layer.wo.i8.q, layer.wo.i8.scales, tbuf->xo_i8.data(), xo_scale,
-        embed_dim, q_size, true
+        tb->x.data(), layer.wo.i8.q, layer.wo.i8.scales, tb->xo_i8.data(), xo_scale,
+        dim, q_size, true
       );
     }
     if (is_interrupted()) return 1;
 
-    std::mdspan x3_mdspan(tbuf->x.data(), 1, embed_dim);
+    std::mdspan x3_mdspan(tb->x.data(), 1, dim);
     rmsnorm(x3_mdspan, x3_mdspan, layer.n2, tcfg->eps);
     if (is_interrupted()) return 1;
 
     // Combine the residual stream
-    floatx *RESTRICT x     = tbuf->x.data();
-    floatx *RESTRICT resid = tbuf->resid.data();
-    for (int d = 0; d < embed_dim; d++)
+    floatx *RESTRICT x     = tb->x.data();
+    floatx *RESTRICT resid = tb->resid.data();
+    for (int d = 0; d < dim; d++)
     {
       /* Sometimes the residual stream accumulates huge values on certain
        * channels, especially in pretrained/bigger models (Sun et al., 2024,
@@ -4142,16 +4142,16 @@ forward_text_decode(
        * scalers afterwards (see export.py), the clamp here is more of a
        * last-resort safety net. */
 
-      tbuf->x[d] = clamp_fpx(x[d] + resid[d]);
+      tb->x[d] = clamp_fpx(x[d] + resid[d]);
     }
     if (is_interrupted()) return 1;
 
-    memcpy(tbuf->resid.data(), tbuf->x.data(), embed_dim * sizeof(*tbuf->x.data()));
+    memcpy(tb->resid.data(), tb->x.data(), dim * sizeof(*tb->x.data()));
 
     // Pre feedforward RMSNorm
-    if (tcfg->pre_mlp_norm)
+    if (tcfg->mlp_pre)
     {
-      std::mdspan x(tbuf->x.data(), 1, embed_dim);
+      std::mdspan x(tb->x.data(), 1, dim);
       rmsnorm(x, x, layer.n3, tcfg->eps);
     }
     if (is_interrupted()) return 1;
@@ -4160,22 +4160,22 @@ forward_text_decode(
     if (!quant)
     {
       gemv_fpx(
-        tbuf->xu.data(), std::mdspan(layer.w1.fpx, tcfg->mlp_dim, embed_dim), tbuf->x.data(), true
+        tb->xu.data(), std::mdspan(layer.w1.fpx, tcfg->mlp_dim, dim), tb->x.data(), true
       );
       gemv_fpx(
-        tbuf->xg.data(), std::mdspan(layer.w2.fpx, tcfg->mlp_dim, embed_dim), tbuf->x.data(), true
+        tb->xg.data(), std::mdspan(layer.w2.fpx, tcfg->mlp_dim, dim), tb->x.data(), true
       );
     }
     else
     {
-      floatx x_scale = quantize_act(tbuf->x_i8.data(), tbuf->x.data(), embed_dim);
+      floatx x_scale = quantize_act(tb->x_i8.data(), tb->x.data(), dim);
       gemv_int8(
-        tbuf->xg.data(), layer.w2.i8.q, layer.w2.i8.scales, tbuf->x_i8.data(), x_scale,
-        tcfg->mlp_dim, embed_dim, true
+        tb->xg.data(), layer.w2.i8.q, layer.w2.i8.scales, tb->x_i8.data(), x_scale,
+        tcfg->mlp_dim, dim, true
       );
       gemv_int8(
-        tbuf->xu.data(), layer.w1.i8.q, layer.w1.i8.scales, tbuf->x_i8.data(), x_scale,
-        tcfg->mlp_dim, embed_dim, true
+        tb->xu.data(), layer.w1.i8.q, layer.w1.i8.scales, tb->x_i8.data(), x_scale,
+        tcfg->mlp_dim, dim, true
       );
     }
     if (is_interrupted()) return 1;
@@ -4186,50 +4186,50 @@ forward_text_decode(
     for (d = 0; d < tcfg->mlp_dim; d++)
     {
       // Tanh approximation of GELU
-      float x     = (float)tbuf->xg[d];
+      float x     = (float)tb->xg[d];
       float c     = 0.79788456080287f;  // = sqrt(2 / pi)
       x           = 0.5 * x * (1 + tanhf(c * (x + 0.044715 * x * x * x)));
-      tbuf->xg[d] = (floatx)x;
-      tbuf->xg[d] *= tbuf->xu[d];  // Fuse xg * xu into xg
+      tb->xg[d] = (floatx)x;
+      tb->xg[d] *= tb->xu[d];  // Fuse xg * xu into xg
     }
     if (is_interrupted()) return 1;
 
     if (!quant)
     {
       gemv_fpx(
-        tbuf->x.data(), std::mdspan(layer.w3.fpx, embed_dim, tcfg->mlp_dim), tbuf->xg.data(), true
+        tb->x.data(), std::mdspan(layer.w3.fpx, dim, tcfg->mlp_dim), tb->xg.data(), true
       );
     }
     else
     {
-      floatx xscale = quantize_act(tbuf->xg_i8.data(), tbuf->xg.data(), tcfg->mlp_dim);
+      floatx xscale = quantize_act(tb->xg_i8.data(), tb->xg.data(), tcfg->mlp_dim);
       gemv_int8(
-        tbuf->x.data(), layer.w3.i8.q, layer.w3.i8.scales, tbuf->xg_i8.data(), xscale,
-        embed_dim, tcfg->mlp_dim, true
+        tb->x.data(), layer.w3.i8.q, layer.w3.i8.scales, tb->xg_i8.data(), xscale,
+        dim, tcfg->mlp_dim, true
       );
     }
     if (is_interrupted()) return 1;
 
     // Post feedforward RMSNorm
-    if (tcfg->pst_mlp_norm)
+    if (tcfg->mlp_pst)
     {
-      std::mdspan x(tbuf->x.data(), 1, embed_dim);
+      std::mdspan x(tb->x.data(), 1, dim);
       rmsnorm(x, x, layer.n4, tcfg->eps);
     }
     if (is_interrupted()) return 1;
 
     // Second residual
-    x     = tbuf->x.data();
-    resid = tbuf->resid.data();
-    for (int d = 0; d < embed_dim; d++)
+    x     = tb->x.data();
+    resid = tb->resid.data();
+    for (int d = 0; d < dim; d++)
     {
-      tbuf->x[d] = clamp_fpx(x[d] + resid[d]);
+      tb->x[d] = clamp_fpx(x[d] + resid[d]);
     }
     if (is_interrupted()) return 1;
   }
 
   // Final RMSNorm
-  std::mdspan x(tbuf->x.data(), 1, embed_dim);
+  std::mdspan x(tb->x.data(), 1, dim);
   rmsnorm(x, x, dec->final_norm, tcfg->eps);
   if (is_interrupted()) return 1;
 
@@ -4239,27 +4239,27 @@ forward_text_decode(
     if (!quant)
     {
       gemv_fpx(
-        tbuf->logits.data(), std::mdspan(dec->embedding.fpx, tcfg->vocab_size, embed_dim), tbuf->x.data(),
+        tb->logits.data(), std::mdspan(dec->embedding.fpx, tcfg->nvocab, dim), tb->x.data(),
         true
       );
     }
     else
     {
-      floatx xscale = quantize_act(tbuf->x_i8.data(), tbuf->x.data(), embed_dim);
+      floatx xscale = quantize_act(tb->x_i8.data(), tb->x.data(), dim);
       gemv_int8(
-        tbuf->logits.data(), dec->embedding.i8.q, dec->embedding.i8.scales,
-        tbuf->x_i8.data(), xscale, tcfg->vocab_size, embed_dim, true
+        tb->logits.data(), dec->embedding.i8.q, dec->embedding.i8.scales,
+        tb->x_i8.data(), xscale, tcfg->nvocab, dim, true
       );
     }
     if (is_interrupted()) return 1;
 
     // Optional logit softcapping
-    if (tcfg->logit_softcap != 0.0f)
+    if (tcfg->sc_log != 0.0f)
     {
-      for (uint32_t d = 0; d < tcfg->vocab_size; d++)
+      for (uint32_t d = 0; d < tcfg->nvocab; d++)
       {
-        float val       = (float)tbuf->logits[d] / tcfg->logit_softcap;
-        tbuf->logits[d] = (floatx)(tanhf(val) * tcfg->logit_softcap);
+        float val       = (float)tb->logits[d] / tcfg->sc_log;
+        tb->logits[d] = (floatx)(tanhf(val) * tcfg->sc_log);
       }
     }
     if (is_interrupted()) return 1;
@@ -4271,7 +4271,7 @@ forward_text_decode(
 static int
 forward_text_chunk(
   TextDecoder *dec,
-  TextBuffer  *tbuf,
+  TextBuffer  *tb,
   int          spos,
   int          n_tokens,
   bool         mask,
@@ -4281,23 +4281,23 @@ forward_text_chunk(
 {
   TextConfig *tcfg = &dec->config;
 
-  if (quant && (tbuf->x_scales.data() == NULL || tbuf->xo_scales.data() == NULL ||
-                 tbuf->xg_scales.data() == NULL))
+  if (quant && (tb->x_scales.data() == NULL || tb->xo_scales.data() == NULL ||
+                 tb->xg_scales.data() == NULL))
   {
     log_error("scale buffers are not allocated");
     return 1;
   }
 
-  int embed_dim  = tcfg->embed_dim;
+  int dim  = tcfg->dim;
   int n_heads    = tcfg->n_heads;
-  int n_kv_heads = tcfg->n_kv_heads;
-  int head_dim   = tcfg->head_dim;
-  int q_size     = n_heads * head_dim;
-  int kv_size    = n_kv_heads * head_dim;
+  int nkv = tcfg->nkv;
+  int hdim   = tcfg->hdim;
+  int q_size     = n_heads * hdim;
+  int kv_size    = nkv * hdim;
 
   int epos = spos + n_tokens - 1;
 
-  if (epos >= tbuf->cache_len)
+  if (epos >= tb->cache_len)
   {
     log_error("kv cache is full");
     return 1;
@@ -4309,22 +4309,22 @@ forward_text_chunk(
   for (t = 0; t < n_tokens; t++)
   {
     int pos = spos + t;
-    int off = t * head_dim;
+    int off = t * hdim;
 
-    for (int d = 0; d < head_dim / 2; d++)
+    for (int d = 0; d < hdim / 2; d++)
     {
       float freq;
-      float e = (float)(-2 * d) / (float)head_dim;
+      float e = (float)(-2 * d) / (float)hdim;
 
       // Sliding window angles
-      freq                                = powf(tcfg->local_theta, e);
-      tbuf->csfreqs_slid[off + d * 2]     = (floatx)cosf(freq * (float)pos);
-      tbuf->csfreqs_slid[off + d * 2 + 1] = (floatx)sinf(freq * (float)pos);
+      freq                                = powf(tcfg->theta_l, e);
+      tb->csfreqs_slid[off + d * 2]     = (floatx)cosf(freq * (float)pos);
+      tb->csfreqs_slid[off + d * 2 + 1] = (floatx)sinf(freq * (float)pos);
 
       // Full attention angles
-      freq                                = powf(tcfg->global_theta, e);
-      tbuf->csfreqs_full[off + d * 2]     = (floatx)cosf(freq * (float)pos);
-      tbuf->csfreqs_full[off + d * 2 + 1] = (floatx)sinf(freq * (float)pos);
+      freq                                = powf(tcfg->theta_g, e);
+      tb->csfreqs_full[off + d * 2]     = (floatx)cosf(freq * (float)pos);
+      tb->csfreqs_full[off + d * 2 + 1] = (floatx)sinf(freq * (float)pos);
     }
   }
   if (is_interrupted()) return 1;
@@ -4335,10 +4335,10 @@ forward_text_chunk(
   {
     const size_t l = &layer - dec->layers.data();
 
-    memcpy(tbuf->resid.data(), tbuf->x.data(), n_tokens * embed_dim * sizeof(*tbuf->x.data()));
+    memcpy(tb->resid.data(), tb->x.data(), n_tokens * dim * sizeof(*tb->x.data()));
 
     int t;
-    std::mdspan x_mdspan1(tbuf->x.data(), n_tokens, embed_dim);
+    std::mdspan x_mdspan1(tb->x.data(), n_tokens, dim);
     rmsnorm(x_mdspan1, x_mdspan1, layer.n1, tcfg->eps);
     if (is_interrupted()) return 1;
 
@@ -4347,7 +4347,7 @@ forward_text_chunk(
     if (quant)
     {
       quantize_acts(
-        tbuf->x_i8.data(), tbuf->x_scales.data(), tbuf->x.data(), 0, n_tokens, embed_dim, true
+        tb->x_i8.data(), tb->x_scales.data(), tb->x.data(), 0, n_tokens, dim, true
       );
     }
 
@@ -4359,53 +4359,53 @@ forward_text_chunk(
     for (h = 0; h < n_heads; h++)
     {
       floatx *xq_head =
-        tbuf->xq.data() + h * n_tokens * head_dim;  // (n_tokens, head_dim)
+        tb->xq.data() + h * n_tokens * hdim;  // (n_tokens, hdim)
       if (!quant)
       {
         if (gemm_fpx(
-              xq_head, 0, layer.wq.fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
-              0, n_tokens, head_dim, embed_dim, false
+              xq_head, 0, layer.wq.fpx + h * hdim * dim, 0, tb->x.data(),
+              0, n_tokens, hdim, dim, false
             ) == 1)
           quit = true;
       }
       else
       {
         if (gemm_int8(
-              xq_head, 0, layer.wq.i8.q + h * head_dim * embed_dim, 0,
-              layer.wq.i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
-              tbuf->x_scales.data(), n_tokens, head_dim, embed_dim, false
+              xq_head, 0, layer.wq.i8.q + h * hdim * dim, 0,
+              layer.wq.i8.scales + h * hdim, tb->x_i8.data(), 0,
+              tb->x_scales.data(), n_tokens, hdim, dim, false
             ) == 1)
           quit = true;
       }
-      if (h >= n_kv_heads) continue;
+      if (h >= nkv) continue;
 
-      floatx *xk_head = tbuf->xk.data() + h * n_tokens * head_dim;
-      floatx *xv_head = tbuf->xv.data() + h * n_tokens * head_dim;
+      floatx *xk_head = tb->xk.data() + h * n_tokens * hdim;
+      floatx *xv_head = tb->xv.data() + h * n_tokens * hdim;
 
       if (!quant)
       {
-        // (n_tokens, n_kv_heads, head_dim)
+        // (n_tokens, nkv, hdim)
         if (gemm_fpx(
-              xk_head, 0, layer.wk.fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
-              0, n_tokens, head_dim, embed_dim, false
+              xk_head, 0, layer.wk.fpx + h * hdim * dim, 0, tb->x.data(),
+              0, n_tokens, hdim, dim, false
             ) == 1 ||
             gemm_fpx(
-              xv_head, 0, layer.wv.fpx + h * head_dim * embed_dim, 0, tbuf->x.data(),
-              0, n_tokens, head_dim, embed_dim, false
+              xv_head, 0, layer.wv.fpx + h * hdim * dim, 0, tb->x.data(),
+              0, n_tokens, hdim, dim, false
             ) == 1)
           quit = true;
       }
       else
       {
         if (gemm_int8(
-              xk_head, 0, layer.wk.i8.q + h * head_dim * embed_dim, 0,
-              layer.wk.i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
-              tbuf->x_scales.data(), n_tokens, head_dim, embed_dim, false
+              xk_head, 0, layer.wk.i8.q + h * hdim * dim, 0,
+              layer.wk.i8.scales + h * hdim, tb->x_i8.data(), 0,
+              tb->x_scales.data(), n_tokens, hdim, dim, false
             ) == 1 ||
             gemm_int8(
-              xv_head, 0, layer.wv.i8.q + h * head_dim * embed_dim, 0,
-              layer.wv.i8.scales + h * head_dim, tbuf->x_i8.data(), 0,
-              tbuf->x_scales.data(), n_tokens, head_dim, embed_dim, false
+              xv_head, 0, layer.wv.i8.q + h * hdim * dim, 0,
+              layer.wv.i8.scales + h * hdim, tb->x_i8.data(), 0,
+              tb->x_scales.data(), n_tokens, hdim, dim, false
             ) == 1)
           quit = true;
       }
@@ -4416,15 +4416,15 @@ forward_text_chunk(
     if (tcfg->qk_norm)
     {
       int h;
-      std::mdspan xq(tbuf->xq.data(), n_heads, n_tokens, head_dim);
-      std::mdspan xk(tbuf->xk.data(), n_kv_heads, n_tokens, head_dim);
+      std::mdspan xq(tb->xq.data(), n_heads, n_tokens, hdim);
+      std::mdspan xk(tb->xk.data(), nkv, n_tokens, hdim);
       // Normalize each token in this head exactly once
       for (h = 0; h < n_heads; h++)
       {
 	      auto xq_ = std::submdspan(xq, h, std::full_extent, std::full_extent);
 	      rmsnorm(xq_, xq_, layer.nq, tcfg->eps);
       }
-      for (h = 0; h < n_kv_heads; h++)
+      for (h = 0; h < nkv; h++)
       {
               auto xk_ = std::submdspan(xk, h, std::full_extent, std::full_extent);
 	      rmsnorm(xk_, xk_, layer.nk, tcfg->eps);
@@ -4432,32 +4432,32 @@ forward_text_chunk(
     }
     if (is_interrupted()) return 1;
 
-    bool    is_local = tcfg->att_layers[l];
-    floatx *freqs_cs = is_local ? tbuf->csfreqs_slid.data() : tbuf->csfreqs_full.data();
+    bool    is_local = tcfg->swa[l];
+    floatx *freqs_cs = is_local ? tb->csfreqs_slid.data() : tb->csfreqs_full.data();
 
     // RoPE
     #pragma omp parallel for private(h, t) OMP_COLLAPSE2 OMP_PARA_ARGS
-    for (h = 0; h < n_heads + n_kv_heads; h++)
+    for (h = 0; h < n_heads + nkv; h++)
       for (t = 0; t < n_tokens; t++)
       {
         floatx *data;
         if (h < n_heads)
         {
-          data = tbuf->xq.data() + h * n_tokens * head_dim +
-                 t * head_dim;  // Apply to queries
+          data = tb->xq.data() + h * n_tokens * hdim +
+                 t * hdim;  // Apply to queries
         }
         else
         {
-          data = tbuf->xk.data() + (h - n_heads) * n_tokens * head_dim +
-                 t * head_dim;  // Apply to keys
+          data = tb->xk.data() + (h - n_heads) * n_tokens * hdim +
+                 t * hdim;  // Apply to keys
         }
 
-        for (int d = 0; d < head_dim / 2; d++)
+        for (int d = 0; d < hdim / 2; d++)
         {
-          float cfr = (float)freqs_cs[2 * d + t * head_dim];
-          float sfr = (float)freqs_cs[2 * d + 1 + t * head_dim];
+          float cfr = (float)freqs_cs[2 * d + t * hdim];
+          float sfr = (float)freqs_cs[2 * d + 1 + t * hdim];
           float a   = (float)data[d];  // Index in the first half vector
-          float b   = (float)data[d + head_dim / 2];  // ... second half vector
+          float b   = (float)data[d + hdim / 2];  // ... second half vector
           float r0  = a * cfr - b * sfr;
           float r1  = a * sfr + b * cfr;
 
@@ -4470,30 +4470,30 @@ forward_text_chunk(
           }
 
           data[d]                = (floatx)r0;
-          data[d + head_dim / 2] = (floatx)r1;
+          data[d + hdim / 2] = (floatx)r1;
         }
       }
 
     if (is_interrupted()) return 1;
 
-    // (n_kv_heads, cache_len, head_dim)
-    floatx *k_cache = tbuf->kv_cache.data() + l * 2 * tbuf->cache_len * kv_size;
-    floatx *v_cache = k_cache + tbuf->cache_len * kv_size;
+    // (nkv, cache_len, hdim)
+    floatx *k_cache = tb->kv_cache.data() + l * 2 * tb->cache_len * kv_size;
+    floatx *v_cache = k_cache + tb->cache_len * kv_size;
 
     // Write to kv_cache
-    for (int h = 0; h < n_kv_heads; h++)
+    for (int h = 0; h < nkv; h++)
     {
       floatx *xk_head =
-        k_cache + h * tbuf->cache_len * head_dim + spos * head_dim;
+        k_cache + h * tb->cache_len * hdim + spos * hdim;
       floatx *xv_head =
-        v_cache + h * tbuf->cache_len * head_dim + spos * head_dim;
+        v_cache + h * tb->cache_len * hdim + spos * hdim;
       memcpy(
-        xk_head, tbuf->xk.data() + h * n_tokens * head_dim,
-        n_tokens * head_dim * sizeof(*tbuf->xk.data())
+        xk_head, tb->xk.data() + h * n_tokens * hdim,
+        n_tokens * hdim * sizeof(*tb->xk.data())
       );
       memcpy(
-        xv_head, tbuf->xv.data() + h * n_tokens * head_dim,
-        n_tokens * head_dim * sizeof(*tbuf->xv.data())
+        xv_head, tb->xv.data() + h * n_tokens * hdim,
+        n_tokens * hdim * sizeof(*tb->xv.data())
       );
     }
     if (is_interrupted()) return 1;
@@ -4504,14 +4504,14 @@ forward_text_chunk(
     #pragma omp parallel for private(h) reduction(|| : quit) OMP_PARA_ARGS
     for (h = 0; h < n_heads; h++)
     {
-      int h_kv = h * n_kv_heads / n_heads;  // GQA mapping
+      int h_kv = h * nkv / n_heads;  // GQA mapping
 
       // (n_tokens, max_k)
-      floatx *att_head = tbuf->att.data() + h * n_tokens * max_k;  // att[h, :, :]
-      // (cache_len, head_dim)
-      floatx *xv_head = v_cache + h_kv * tbuf->cache_len * head_dim;
+      floatx *att_head = tb->att.data() + h * n_tokens * max_k;  // att[h, :, :]
+      // (cache_len, hdim)
+      floatx *xv_head = v_cache + h_kv * tb->cache_len * hdim;
       floatx *xo_head =
-        tbuf->xo.data() + h * head_dim;  // (n_tokens, head_dim), column stride q_size
+        tb->xo.data() + h * hdim;  // (n_tokens, hdim), column stride q_size
 
       /* Blockwise causal masking, the tiling algorithm used in the
        * FlashAttention paper (Dao et al., 2022,
@@ -4540,14 +4540,14 @@ forward_text_chunk(
       {
         for (int q_start = 0; q_start < n_tokens; q_start += QK_BLOCK_SIZE)
         {
-          // xq[h, q_start:q_end, :] (q_end - q_start, head_dim)
-          floatx *qb = tbuf->xq.data() + h * n_tokens * head_dim + q_start * head_dim;
+          // xq[h, q_start:q_end, :] (q_end - q_start, hdim)
+          floatx *qb = tb->xq.data() + h * n_tokens * hdim + q_start * hdim;
           int     q_end       = std::min(q_start + QK_BLOCK_SIZE, n_tokens);
           int     abs_q_end   = spos + q_end;
           int     abs_q_start = spos + q_start;
-          if (is_local && abs_q_start >= tcfg->slide_len)
+          if (is_local && abs_q_start >= tcfg->slide)
           {
-            abs_q_start = abs_q_start + 1 - tcfg->slide_len;
+            abs_q_start = abs_q_start + 1 - tcfg->slide;
           }
           else
           {
@@ -4558,16 +4558,16 @@ forward_text_chunk(
           for (int k_start = spos_b; k_start < abs_q_end;
             k_start += QK_BLOCK_SIZE)
           {
-            // k_cache[h_kv, k_start:k_end, :] (k_end - k_start, head_dim)
+            // k_cache[h_kv, k_start:k_end, :] (k_end - k_start, hdim)
             floatx *kb =
-              k_cache + h_kv * tbuf->cache_len * head_dim + k_start * head_dim;
+              k_cache + h_kv * tb->cache_len * hdim + k_start * hdim;
             int     k_end = std::min(k_start + QK_BLOCK_SIZE, max_k);
             floatx *att_b = att_head + q_start * max_k + k_start;
 
             // Typically people don't quantize this
             if (gemm_fpx(
                   att_b, max_k, kb, 0, qb, 0, q_end - q_start, k_end - k_start,
-                  head_dim, false
+                  hdim, false
                 ) == 1)
               quit = true;
 
@@ -4575,8 +4575,8 @@ forward_text_chunk(
             for (int qi = q_start; qi < q_end; qi++)
             {
               int pos_i  = spos + qi;
-              int spos_i = (is_local && pos_i >= tcfg->slide_len)
-                             ? (pos_i + 1 - tcfg->slide_len)
+              int spos_i = (is_local && pos_i >= tcfg->slide)
+                             ? (pos_i + 1 - tcfg->slide)
                              : 0;
               for (int ki = k_start; ki < k_end; ki++)
               {
@@ -4592,47 +4592,47 @@ forward_text_chunk(
           {
             floatx *att_row = att_head + qi * max_k;
             int     pos_i   = spos + qi;
-            int     spos_i  = (is_local && pos_i >= tcfg->slide_len)
-                                ? (pos_i + 1 - tcfg->slide_len)
+            int     spos_i  = (is_local && pos_i >= tcfg->slide)
+                                ? (pos_i + 1 - tcfg->slide)
                                 : 0;
 
             // Optional tanh softcapping
-            if (tcfg->att_softcap != 0.0f)
+            if (tcfg->sc_att != 0.0f)
             {
               for (int t = spos_i; t <= pos_i; t++)
               {
-                float val  = (float)att_row[t] / tcfg->att_softcap;
-                att_row[t] = (floatx)(tanhf(val) * tcfg->att_softcap);
+                float val  = (float)att_row[t] / tcfg->sc_att;
+                att_row[t] = (floatx)(tanhf(val) * tcfg->sc_att);
               }
             }
             // only softmax in the range [spos_i, pos_i]
             softmax(att_row + spos_i, att_row + spos_i, pos_i - spos_i + 1);
           }
 
-          // xo_block (qb_len, head_dim) = att_block (qb_len, qb_len)
-          //                             @ v_block (qb_len, head_dim)
+          // xo_block (qb_len, hdim) = att_block (qb_len, qb_len)
+          //                             @ v_block (qb_len, hdim)
           floatx *xo_block  = xo_head + q_start * q_size;
           floatx *att_block = att_head + q_start * max_k + spos_b;
-          floatx *v_block   = xv_head + spos_b * head_dim;
+          floatx *v_block   = xv_head + spos_b * hdim;
 
           gemm_fpx_nn(
             xo_block, /*dst_stride=*/q_size, v_block, /*mat_stride=*/0,
             att_block,
-            /*src_stride=*/max_k, q_end - q_start, head_dim, abs_q_end - spos_b,
+            /*src_stride=*/max_k, q_end - q_start, hdim, abs_q_end - spos_b,
             false
           );
         }
       }
       else  // mask=false, take the dense path
       {
-        // (n_tokens, head_dim)
-        floatx *xq_head = tbuf->xq.data() + h * n_tokens * head_dim;  // xq[h, :, :]
-        // k_cache[h_kv, :, :] (cache_len, head_dim)
-        floatx *xk_head = k_cache + h_kv * tbuf->cache_len * head_dim;
+        // (n_tokens, hdim)
+        floatx *xq_head = tb->xq.data() + h * n_tokens * hdim;  // xq[h, :, :]
+        // k_cache[h_kv, :, :] (cache_len, hdim)
+        floatx *xk_head = k_cache + h_kv * tb->cache_len * hdim;
         // att_head = xq_head @ xk_head.T
         if (gemm_fpx(
               att_head, max_k, xk_head, 0, xq_head, 0, n_tokens, max_k,
-              head_dim, false
+              hdim, false
             ))
           quit = true;
 
@@ -4643,73 +4643,73 @@ forward_text_chunk(
           // Optional tanh softcapping
           for (int t = 0; t < max_k; t++)
           {
-            if (tcfg->att_softcap != 0.0f)
+            if (tcfg->sc_att != 0.0f)
             {
-              float val  = (float)att_row[t] / tcfg->att_softcap;
-              att_row[t] = (floatx)(tanhf(val) * tcfg->att_softcap);
+              float val  = (float)att_row[t] / tcfg->sc_att;
+              att_row[t] = (floatx)(tanhf(val) * tcfg->sc_att);
             }
           }
           // Softmax
           softmax(att_row, att_row, max_k);
         }
-        // xo_head (n_tokens, head_dim) = att_head (n_tokens, max_k)
-        //                              @ xv_head[:max_k] (max_k, head_dim)
+        // xo_head (n_tokens, hdim) = att_head (n_tokens, max_k)
+        //                              @ xv_head[:max_k] (max_k, hdim)
         gemm_fpx_nn(
           xo_head, /*dst_stride=*/q_size, xv_head, /*mat_stride=*/0, att_head,
-          /*src_stride=*/max_k, n_tokens, head_dim, max_k, false
+          /*src_stride=*/max_k, n_tokens, hdim, max_k, false
         );
       }
     }
     if (is_interrupted()) return 1;
-    // x (n_tokens, embed_dim) = xo_head (n_tokens, head_dim)
-    //                         @ wo.T (head_dim, embed_dim)
+    // x (n_tokens, dim) = xo_head (n_tokens, hdim)
+    //                         @ wo.T (hdim, dim)
     if (!quant)
     {
       if (gemm_fpx(
-            tbuf->x.data(), 0, layer.wo.fpx, 0, tbuf->xo.data(), q_size, n_tokens,
-            embed_dim, q_size, true
+            tb->x.data(), 0, layer.wo.fpx, 0, tb->xo.data(), q_size, n_tokens,
+            dim, q_size, true
           ) == 1)
         return 1;
     }
     else
     {
       quantize_acts(
-        tbuf->xo_i8.data(), tbuf->xo_scales.data(), tbuf->xo.data(), q_size, n_tokens, q_size, true
+        tb->xo_i8.data(), tb->xo_scales.data(), tb->xo.data(), q_size, n_tokens, q_size, true
       );
       if (gemm_int8(
-            tbuf->x.data(), 0, layer.wo.i8.q, 0, layer.wo.i8.scales, tbuf->xo_i8.data(),
-            0, tbuf->xo_scales.data(), n_tokens, embed_dim, q_size, true
+            tb->x.data(), 0, layer.wo.i8.q, 0, layer.wo.i8.scales, tb->xo_i8.data(),
+            0, tb->xo_scales.data(), n_tokens, dim, q_size, true
           ) == 1)
         return 1;
     }
     if (is_interrupted()) return 1;
 
-    std::mdspan x_mdspan(tbuf->x.data(), n_tokens, embed_dim);
+    std::mdspan x_mdspan(tb->x.data(), n_tokens, dim);
     rmsnorm(x_mdspan, x_mdspan, layer.n2, tcfg->eps);
     if (is_interrupted()) return 1;
 
-    floatx *RESTRICT x     = tbuf->x.data();
-    floatx *RESTRICT resid = tbuf->resid.data();
+    floatx *RESTRICT x     = tb->x.data();
+    floatx *RESTRICT resid = tb->resid.data();
 
     int d;
     #pragma omp parallel for private(d) OMP_PARA_ARGS
-    for (d = 0; d < n_tokens * embed_dim; d++)
+    for (d = 0; d < n_tokens * dim; d++)
     {
       // Combine the residual stream
-      tbuf->x[d] = clamp_fpx(x[d] + resid[d]);
+      tb->x[d] = clamp_fpx(x[d] + resid[d]);
     }
     if (is_interrupted()) return 1;
 
-    memcpy(tbuf->resid.data(), tbuf->x.data(), n_tokens * embed_dim * sizeof(*tbuf->x.data()));
+    memcpy(tb->resid.data(), tb->x.data(), n_tokens * dim * sizeof(*tb->x.data()));
 
-    if (tcfg->pre_mlp_norm)
+    if (tcfg->mlp_pre)
     {
       int t;
       #pragma omp parallel for private(t) OMP_PARA_ARGS
       for (t = 0; t < n_tokens; t++)
       {
-        floatx *x_row = tbuf->x.data() + t * embed_dim;
-        std::mdspan x(x_row, 1, embed_dim);
+        floatx *x_row = tb->x.data() + t * dim;
+        std::mdspan x(x_row, 1, dim);
         rmsnorm(x, x, layer.n3, tcfg->eps);
       }
     }
@@ -4719,27 +4719,27 @@ forward_text_chunk(
     if (!quant)
     {
       if (gemm_fpx(
-            tbuf->xu.data(), 0, layer.w1.fpx, 0, tbuf->x.data(), 0, n_tokens, tcfg->mlp_dim,
-            embed_dim, true
+            tb->xu.data(), 0, layer.w1.fpx, 0, tb->x.data(), 0, n_tokens, tcfg->mlp_dim,
+            dim, true
           ) == 1 ||
           gemm_fpx(
-            tbuf->xg.data(), 0, layer.w2.fpx, 0, tbuf->x.data(), 0, n_tokens, tcfg->mlp_dim,
-            embed_dim, true
+            tb->xg.data(), 0, layer.w2.fpx, 0, tb->x.data(), 0, n_tokens, tcfg->mlp_dim,
+            dim, true
           ) == 1)
         return 1;
     }
     else
     {
       quantize_acts(
-        tbuf->x_i8.data(), tbuf->x_scales.data(), tbuf->x.data(), 0, n_tokens, embed_dim, true
+        tb->x_i8.data(), tb->x_scales.data(), tb->x.data(), 0, n_tokens, dim, true
       );
       if (gemm_int8(
-            tbuf->xu.data(), 0, layer.w1.i8.q, 0, layer.w1.i8.scales, tbuf->x_i8.data(),
-            0, tbuf->x_scales.data(), n_tokens, tcfg->mlp_dim, embed_dim, true
+            tb->xu.data(), 0, layer.w1.i8.q, 0, layer.w1.i8.scales, tb->x_i8.data(),
+            0, tb->x_scales.data(), n_tokens, tcfg->mlp_dim, dim, true
           ) == 1 ||
           gemm_int8(
-            tbuf->xg.data(), 0, layer.w2.i8.q, 0, layer.w2.i8.scales, tbuf->x_i8.data(),
-            0, tbuf->x_scales.data(), n_tokens, tcfg->mlp_dim, embed_dim, true
+            tb->xg.data(), 0, layer.w2.i8.q, 0, layer.w2.i8.scales, tb->x_i8.data(),
+            0, tb->x_scales.data(), n_tokens, tcfg->mlp_dim, dim, true
           ))
         return 1;
     }
@@ -4750,11 +4750,11 @@ forward_text_chunk(
     for (d = 0; d < n_tokens * tcfg->mlp_dim; d++)
     {
       // Tanh approximation of GELU
-      float x     = (float)tbuf->xg[d];
+      float x     = (float)tb->xg[d];
       float c     = 0.79788456080287f;  // = sqrt(2 / pi)
       x           = 0.5 * x * (1 + tanhf(c * (x + 0.044715 * x * x * x)));
-      tbuf->xg[d] = (floatx)x;
-      tbuf->xg[d] *= tbuf->xu[d];  // Fuse xg * xu into xg
+      tb->xg[d] = (floatx)x;
+      tb->xg[d] *= tb->xu[d];  // Fuse xg * xu into xg
     }
     if (is_interrupted()) return 1;
 
@@ -4762,7 +4762,7 @@ forward_text_chunk(
     if (!quant)
     {
       if (gemm_fpx(
-            tbuf->x.data(), 0, layer.w3.fpx, 0, tbuf->xg.data(), 0, n_tokens, embed_dim,
+            tb->x.data(), 0, layer.w3.fpx, 0, tb->xg.data(), 0, n_tokens, dim,
             tcfg->mlp_dim, true
           ) == 1)
         return 1;
@@ -4770,35 +4770,35 @@ forward_text_chunk(
     else
     {
       quantize_acts(
-        tbuf->xg_i8.data(), tbuf->xg_scales.data(), tbuf->xg.data(), 0, n_tokens, tcfg->mlp_dim, true
+        tb->xg_i8.data(), tb->xg_scales.data(), tb->xg.data(), 0, n_tokens, tcfg->mlp_dim, true
       );
       if (gemm_int8(
-            tbuf->x.data(), 0, layer.w3.i8.q, 0, layer.w3.i8.scales, tbuf->xg_i8.data(),
-            0, tbuf->xg_scales.data(), n_tokens, embed_dim, tcfg->mlp_dim, true
+            tb->x.data(), 0, layer.w3.i8.q, 0, layer.w3.i8.scales, tb->xg_i8.data(),
+            0, tb->xg_scales.data(), n_tokens, dim, tcfg->mlp_dim, true
           ) == 1)
         return 1;
     }
     if (is_interrupted()) return 1;
 
-    if (tcfg->pst_mlp_norm)
+    if (tcfg->mlp_pst)
     {
       #pragma omp parallel for private(t) OMP_PARA_ARGS
       for (t = 0; t < n_tokens; t++)
       {
-        floatx *x_row = tbuf->x.data() + t * embed_dim;
-        std::mdspan x(x_row, 1, embed_dim);
+        floatx *x_row = tb->x.data() + t * dim;
+        std::mdspan x(x_row, 1, dim);
         rmsnorm(x, x, layer.n4, tcfg->eps);
       }
     }
     if (is_interrupted()) return 1;
 
-    x     = tbuf->x.data();
-    resid = tbuf->resid.data();
+    x     = tb->x.data();
+    resid = tb->resid.data();
     #pragma omp parallel for private(d) OMP_PARA_ARGS
-    for (d = 0; d < n_tokens * embed_dim; d++)
+    for (d = 0; d < n_tokens * dim; d++)
     {
       // Second residual
-      tbuf->x[d] = clamp_fpx(x[d] + resid[d]);
+      tb->x[d] = clamp_fpx(x[d] + resid[d]);
     }
     if (is_interrupted()) return 1;
   }
@@ -4807,39 +4807,39 @@ forward_text_chunk(
   #pragma omp parallel for private(t) OMP_PARA_ARGS
   for (t = 0; t < n_tokens; t++)
   {
-    floatx *x_row = tbuf->x.data() + t * embed_dim;
-    std::mdspan x(x_row, 1, embed_dim);
+    floatx *x_row = tb->x.data() + t * dim;
+    std::mdspan x(x_row, 1, dim);
     rmsnorm(x, x, dec->final_norm, tcfg->eps);
   }
 
   // Compute logits (tied embedding)
   if (compute_logits)
   {
-    floatx *last_x = tbuf->x.data() + (n_tokens - 1) * embed_dim;
+    floatx *last_x = tb->x.data() + (n_tokens - 1) * dim;
     if (!quant)
     {
       gemv_fpx(
-        tbuf->logits.data(), std::mdspan(dec->embedding.fpx, tcfg->vocab_size, embed_dim), last_x, 
+        tb->logits.data(), std::mdspan(dec->embedding.fpx, tcfg->nvocab, dim), last_x, 
         true
       );
     }
     else
     {
-      floatx xscale = quantize_act(tbuf->x_i8.data(), last_x, embed_dim);
+      floatx xscale = quantize_act(tb->x_i8.data(), last_x, dim);
       gemv_int8(
-        tbuf->logits.data(), dec->embedding.i8.q, dec->embedding.i8.scales,
-        tbuf->x_i8.data(), xscale, tcfg->vocab_size, embed_dim, true
+        tb->logits.data(), dec->embedding.i8.q, dec->embedding.i8.scales,
+        tb->x_i8.data(), xscale, tcfg->nvocab, dim, true
       );
     }
     if (is_interrupted()) return 1;
 
     // Optional logit softcapping
-    if (tcfg->logit_softcap != 0.0f)
+    if (tcfg->sc_log != 0.0f)
     {
-      for (uint32_t d = 0; d < tcfg->vocab_size; d++)
+      for (uint32_t d = 0; d < tcfg->nvocab; d++)
       {
-        float val       = (float)tbuf->logits[d] / tcfg->logit_softcap;
-        tbuf->logits[d] = (floatx)(tanhf(val) * tcfg->logit_softcap);
+        float val       = (float)tb->logits[d] / tcfg->sc_log;
+        tb->logits[d] = (floatx)(tanhf(val) * tcfg->sc_log);
       }
     }
     if (is_interrupted()) return 1;
@@ -4851,47 +4851,47 @@ NO_FAST_MATH_END;
 
 /* Language + vision model forward */
 int
-forward_gemma_decode(GemmaModel *model, TextBuffer *tbuf, int token, int pos)
+forward_gemma_decode(GemmaModel *model, TextBuffer *tb, int token, int pos)
 {
   TextDecoder *dec = model->decoder.get();
 
   /* Embedding lookup.
-   * The export script already applied 1/sqrt(embed_dim), so the usual
-   * Gemma sqrt(embed_dim) scale cancels out to 1.0 here. */
+   * The export script already applied 1/sqrt(dim), so the usual
+   * Gemma sqrt(dim) scale cancels out to 1.0 here. */
   floatx embed_scale =
-    1.0f;  // equivalent to sqrt(embed_dim) * (1/sqrt(embed_dim))
+    1.0f;  // equivalent to sqrt(dim) * (1/sqrt(dim))
   if (model->quant)
   {
     // Dequantize
     embed_scale *= dec->embedding.i8.scales[token];
   }
 
-  int embed_dim = dec->config.embed_dim;
+  int dim = dec->config.dim;
 
   // x = embedding[tok] * embed_scale
   int d;
   #pragma omp parallel for private(d) OMP_PARA_ARGS
-  for (d = 0; d < embed_dim; d++)
+  for (d = 0; d < dim; d++)
   {
     if (!model->quant)
     {
-      tbuf->x[d] = dec->embedding.fpx[token * embed_dim + d] * embed_scale;
+      tb->x[d] = dec->embedding.fpx[token * dim + d] * embed_scale;
     }
     else
     {
-      tbuf->x[d] =
-        (floatx)dec->embedding.i8.q[token * embed_dim + d] * embed_scale;
+      tb->x[d] =
+        (floatx)dec->embedding.i8.q[token * dim + d] * embed_scale;
     }
   }
   if (is_interrupted()) return 1;
-  return forward_text_decode(model->decoder.get(), tbuf, pos, model->quant, true);
+  return forward_text_decode(model->decoder.get(), tb, pos, model->quant, true);
 }
 
 /* Language model prefill */
 int
 forward_gemma_prefill(
   GemmaModel *model,
-  TextBuffer *tbuf,
+  TextBuffer *tb,
   std::span<const int> tokens,
   int        *pos,
   size_t     chunk_size,
@@ -4900,7 +4900,7 @@ forward_gemma_prefill(
 )
 {
   TextDecoder *dec       = model->decoder.get();
-  int          embed_dim = dec->config.embed_dim;
+  int          dim = dec->config.dim;
 
   // Prefill by chunks
   for (size_t off = 0; off < tokens.size(); off += chunk_size)
@@ -4912,28 +4912,28 @@ forward_gemma_prefill(
     for (int t = 0; t < cur_len; t++)
     {
       int token   = tokens[off + t];
-      int emb_off = t * embed_dim;
+      int emb_off = t * dim;
 
       rpen_visited[token] = 1;
 
-      for (int d = 0; d < embed_dim; d++)
+      for (int d = 0; d < dim; d++)
       {
         if (!model->quant)
         {
-          tbuf->x[emb_off + d] =
-            dec->embedding.fpx[token * embed_dim + d];  // * 1.0f
+          tb->x[emb_off + d] =
+            dec->embedding.fpx[token * dim + d];  // * 1.0f
         }
         else
         {
-          tbuf->x[emb_off + d] =
-            (floatx)dec->embedding.i8.q[token * embed_dim + d] *
+          tb->x[emb_off + d] =
+            (floatx)dec->embedding.i8.q[token * dim + d] *
             dec->embedding.i8.scales[token];
         }
       }
     }
 
     int rc = forward_text_chunk(
-      dec, tbuf, *pos + off, cur_len, true, model->quant,
+      dec, tb, *pos + off, cur_len, true, model->quant,
       is_last_chunk && compute_logits
     );
 
@@ -4948,8 +4948,8 @@ forward_gemma_prefill(
 int
 forward_gemma_image(
   GemmaModel   *model,
-  TextBuffer   *tbuf,
-  VisionBuffer *vbuf,
+  TextBuffer   *tb,
+  VisionBuffer *vb,
   const floatx *image,
   int          *pos,
   bool          compute_logits
@@ -4962,19 +4962,19 @@ forward_gemma_image(
   }
 
   TextDecoder *dec = model->decoder.get();
-  if (forward_vision(enc, &dec->config, tbuf, vbuf, image, model->quant) == 1)
+  if (forward_vision(enc, &dec->config, tb, vb, image, model->quant) == 1)
   {
     return 1;
   }
 
-  int image_toks = dec->config.image_toks;
+  int img_tok = dec->config.img_tok;
 
   int suc = forward_text_chunk(
     // Gemma 3 models uses bi-directional attention for vision tokens
-    dec, tbuf, *pos, image_toks, false, model->quant, compute_logits
+    dec, tb, *pos, img_tok, false, model->quant, compute_logits
   );
 
-  *pos += image_toks;
+  *pos += img_tok;
   return suc;
 }
 
@@ -4982,7 +4982,7 @@ forward_gemma_image(
 
 /* */
 static int
-argmax(floatx *logits, int vocab_size)
+argmax(floatx *logits, int nvocab)
 {
   // Pick the index with the max value
   int    max_idx = -1;
@@ -4994,7 +4994,7 @@ argmax(floatx *logits, int vocab_size)
 
     int i;
     #pragma omp for nowait
-    for (i = 0; i < vocab_size; i++)
+    for (i = 0; i < nvocab; i++)
     {
       if (logits[i] > local_val)
       {
@@ -5078,30 +5078,30 @@ quickselect_topk(FloatIdx *arr, int lo, int hi, int k_idx)
 
 /* */
 static void
-apply_topk(floatx *logits, std::span<FloatIdx> logit_indices, int vocab_size, int k)
+apply_topk(floatx *logits, std::span<FloatIdx> logit_indices, int nvocab, int k)
 {
   if (k <= 0)
   {
     k = 1;
   }
-  if (k > vocab_size)
+  if (k > nvocab)
   {
-    k = vocab_size;
+    k = nvocab;
   }
 
   // Record index info
   int i;
   #pragma omp parallel for private(i) OMP_PARA_ARGS
-  for (i = 0; i < vocab_size; i++)
+  for (i = 0; i < nvocab; i++)
   {
     logit_indices[i].idx = i;
     logit_indices[i].val = logits[i];
   }
-  quickselect_topk(logit_indices.data(), 0, vocab_size - 1, k - 1);
+  quickselect_topk(logit_indices.data(), 0, nvocab - 1, k - 1);
 
   // Keep the top k channels
   #pragma omp parallel for private(i) OMP_PARA_ARGS
-  for (i = 0; i < vocab_size; i++)
+  for (i = 0; i < nvocab; i++)
   {
     logits[i] = -FLOATX_MAX;
   }
@@ -5153,24 +5153,24 @@ apply_topp(
   floatx   *logits,
   std::span<floatx> fpbuf,
   std::span<FloatIdx> logit_indices,
-  int       vocab_size,
+  int       nvocab,
   int       k,
   float     p
 )
 {
-  if (k > vocab_size)
+  if (k > nvocab)
   {
-    k = vocab_size;
+    k = nvocab;
   }
   // Softmax to get the probs, store in fpbuf
-  softmax(fpbuf.data(), logits, vocab_size);
-  int heap_size = (k == 0) ? vocab_size : k;
+  softmax(fpbuf.data(), logits, nvocab);
+  int heap_size = (k == 0) ? nvocab : k;
 
   if (k == 0)
   {
     int i;
     #pragma omp parallel for private(i) OMP_PARA_ARGS
-    for (i = 0; i < vocab_size; i++)
+    for (i = 0; i < nvocab; i++)
     {
       logit_indices[i].idx = i;
       logit_indices[i].val = fpbuf[i];
@@ -5187,12 +5187,12 @@ apply_topp(
   build_heap(logit_indices.data(), heap_size);  // O(k)
 
   // fpbuf is now a copy of the original logits
-  memcpy(fpbuf.data(), logits, vocab_size * sizeof(floatx));
+  memcpy(fpbuf.data(), logits, nvocab * sizeof(floatx));
 
   // Set logits to -inf
   int i;
   #pragma omp parallel for private(i) OMP_PARA_ARGS
-  for (i = 0; i < vocab_size; i++)
+  for (i = 0; i < nvocab; i++)
   {
     logits[i] = -FLOATX_MAX;
   }
@@ -5205,7 +5205,7 @@ apply_topp(
     FloatIdx top     = logit_indices[0];
     logit_indices[0] = logit_indices[--heap_size];  // Put the last element to
                                                     // the top
-    sift_down(logit_indices.data(), heap_size, 0);         // O(log(vocab_size))
+    sift_down(logit_indices.data(), heap_size, 0);         // O(log(nvocab))
 
     logits[top.idx] = fpbuf[top.idx];
     cum += (float)top.val;
@@ -5260,7 +5260,7 @@ sample_from_logits(
   std::span<floatx> probs,
   std::span<FloatIdx> logit_indices,
   std::span<const uint8_t> visited,
-  int       vocab_size,
+  int       nvocab,
   float     temperature,
   int       topk,
   float     topp,
@@ -5273,7 +5273,7 @@ sample_from_logits(
   if (!dosample)
   {
     // Argmax sampling
-    return argmax(logits, vocab_size);
+    return argmax(logits, nvocab);
   }
 
   bool use_topk = dosample && topk != 0;
@@ -5283,18 +5283,18 @@ sample_from_logits(
   // Apply the temperature
   int d;
   #pragma omp parallel for private(d) OMP_PARA_ARGS
-  for (d = 0; d < vocab_size; d++)
+  for (d = 0; d < nvocab; d++)
   {
     logits[d] /= (floatx)temperature;
   }
 
   if (use_topk)
   {
-    apply_topk(logits, logit_indices, vocab_size, topk);
+    apply_topk(logits, logit_indices, nvocab, topk);
   }
   if (use_topp)
   {
-    apply_topp(logits, probs, logit_indices, vocab_size, topk, topp);
+    apply_topp(logits, probs, logit_indices, nvocab, topk, topp);
   }
   if (use_rpen)
   {
@@ -5302,14 +5302,14 @@ sample_from_logits(
   }
 
   // Softmax to get the probs
-  softmax(probs.data(), logits, vocab_size);
+  softmax(probs.data(), logits, nvocab);
 
   // Multinomial sample from probs
   float r   = (float)((float)rand() / (RAND_MAX + 1.0));
   float sum = 0.0f;
 
-  int token = vocab_size - 1;
-  for (int d = 0; d < vocab_size; d++)
+  int token = nvocab - 1;
+  for (int d = 0; d < nvocab; d++)
   {
     sum += (float)probs[d];
     if (r < sum)
@@ -5388,14 +5388,14 @@ std::tuple<double, int, double, int>
 sample(
   // Input parameters
   GemmaModel   *model,
-  TextBuffer   *tbuf,
-  VisionBuffer *vbuf,
+  TextBuffer   *tb,
+  VisionBuffer *vb,
   const Options &options,
   std::function_ref<InjectData(int)> inject_callback
 )
 {
   TextConfig *tcfg       = &model->decoder->config;
-  int         vocab_size = tcfg->vocab_size;
+  int         nvocab = tcfg->nvocab;
 
   double    prf_t0        = 0.0;
   double    prf_t1        = 0.0;
@@ -5403,9 +5403,9 @@ sample(
   double    gen_t1        = 0.0;
   int       pos           = 0;
   int       token         = 0;
-  std::vector<uint8_t>    visited(vocab_size, 0);
-  std::vector<floatx>     probs(vocab_size, 0.0);;
-  std::vector<FloatIdx> logit_indices(vocab_size);
+  std::vector<uint8_t>    visited(nvocab, 0);
+  std::vector<floatx>     probs(nvocab, 0.0);;
+  std::vector<FloatIdx> logit_indices(nvocab);
   int       bos_tok       = 0;
   InjectData injected    = {};
 
@@ -5416,7 +5416,7 @@ sample(
   prf_t0      = now_sec();
   bos_tok = model->tokenizer->bos;
   if (forward_gemma_prefill(
-        model, tbuf, std::span(&bos_tok, 1), &pos, options.chunk_size, visited, false
+        model, tb, std::span(&bos_tok, 1), &pos, options.chunk_size, visited, false
       ) == 1)
   {
     return stats;
@@ -5433,7 +5433,7 @@ sample(
     {
       // pure auto-regressive step
       gen_t0 = now_sec();
-      if (forward_gemma_decode(model, tbuf, token, pos) == 1) return stats;
+      if (forward_gemma_decode(model, tb, token, pos) == 1) return stats;
       pos++;
 
       if (is_interrupted()) break;
@@ -5455,7 +5455,7 @@ sample(
       if (injected.type == INJECT_TEXT)
       {
         if (forward_gemma_prefill(
-              model, tbuf, injected.tokens, &pos, options.chunk_size,
+              model, tb, injected.tokens, &pos, options.chunk_size,
               visited, is_last
             ) == 1)
         {
@@ -5465,7 +5465,7 @@ sample(
       else if (injected.type == INJECT_IMAG)
       {
         if (forward_gemma_image(
-              model, tbuf, vbuf, injected.image, &pos, is_last
+              model, tb, vb, injected.image, &pos, is_last
             ) == 1)
         {
           return stats;
@@ -5489,7 +5489,7 @@ sample(
 
     // Common sample path (both Case A and last-injection)
     token = sample_from_logits(
-      tbuf->logits.data(), probs, logit_indices, visited, vocab_size, options.temperature,
+      tb->logits.data(), probs, logit_indices, visited, nvocab, options.temperature,
       options.topk, options.topp, options.rpen
     );
     visited[token] = 1;
@@ -5613,7 +5613,7 @@ image_inject(GemmaModel *model, InjectContext *ctx, bool enable_mm)
 
   int  spos, epos;
   bool use_mm = model->support_mm && enable_mm;
-  int image_size = (enc && use_mm) ? enc->config.image_size : 0;
+  int img_px = (enc && use_mm) ? enc->config.img_px : 0;
 
   spos = ctx->tokens_len;
   ctx->tokens_len += encode(tok, "\n\n", ctx->tokens_buf + spos);
@@ -5622,7 +5622,7 @@ image_inject(GemmaModel *model, InjectContext *ctx, bool enable_mm)
   co_yield InjectData{.type = INJECT_TEXT,
     .tokens = std::span(ctx->tokens_buf + spos, epos - spos)};
 
-  cmd_ctx->img = prepare_image(cmd_ctx->arg, image_size);
+  cmd_ctx->img = prepare_image(cmd_ctx->arg, img_px);
   if (cmd_ctx->img.empty())
   {
     log_error("failed to prepare image: '%s'", cmd_ctx->arg.c_str());
@@ -5655,7 +5655,7 @@ longimage_inject(GemmaModel *model, InjectContext *ctx, bool enable_mm)
   GemmaTokenizer *tok = model->tokenizer.get();
   CommandContext *cmd = &ctx->cmd_ctx;
   bool use_mm = model->support_mm && enable_mm;
-  int image_size = (enc && use_mm) ? enc->config.image_size : 0;
+  int img_px = (enc && use_mm) ? enc->config.img_px : 0;
   int spos, epos;
 
   spos = ctx->tokens_len;
@@ -5667,7 +5667,7 @@ longimage_inject(GemmaModel *model, InjectContext *ctx, bool enable_mm)
     .tokens = std::span(ctx->tokens_buf + spos, epos - spos)};
 
   cmd->path = cmd->arg;
-  cmd->crops = prepare_longimage(cmd->path, image_size, MIN_CROP_SIZE,
+  cmd->crops = prepare_longimage(cmd->path, img_px, MIN_CROP_SIZE,
     MAX_NUM_CROPS, &cmd->n_crops);
   if (cmd->crops.empty())
   {
@@ -5707,7 +5707,7 @@ longimage_inject(GemmaModel *model, InjectContext *ctx, bool enable_mm)
         .tokens = std::span(ctx->tokens_buf + spos, epos - spos)};
     }
     co_yield InjectData{.type = INJECT_IMAG,
-      .image = cmd->crops.data() + (size_t)crop_i * image_size * image_size * 3};
+      .image = cmd->crops.data() + (size_t)crop_i * img_px * img_px * 3};
     spos = ctx->tokens_len;
     ctx->tokens_buf[ctx->tokens_len++] = tok->eoi;
     ctx->tokens_len += encode(tok, "\n\n", ctx->tokens_buf + ctx->tokens_len);
@@ -5840,8 +5840,8 @@ std::tuple<double, int, double, int>
 generate(
   // Input parameters
   GemmaModel   *model,
-  TextBuffer   *tbuf,
-  VisionBuffer *vbuf,
+  TextBuffer   *tb,
+  VisionBuffer *vb,
   const Options& options
 )
 {
@@ -5877,7 +5877,7 @@ generate(
   };
 
   return sample(
-    model, tbuf, vbuf, options, 
+    model, tb, vb, options, 
     generate_inject
   );
 }
@@ -5949,8 +5949,8 @@ std::tuple<double, int, double, int>
 chat(
   // Input parameters
   GemmaModel   *model,
-  TextBuffer   *tbuf,
-  VisionBuffer *vbuf,
+  TextBuffer   *tb,
+  VisionBuffer *vb,
   const Options& options
 )
 {
@@ -5992,7 +5992,7 @@ chat(
   };
 
   return sample(
-    model, tbuf, vbuf, options,
+    model, tb, vb, options,
     chat_inject
   );
 }
@@ -6104,7 +6104,7 @@ print_model_config(
   std::println("  {:<{}}: {:.2f} GB", "decoder weights", width, dec_w_GB);
 
   // KV cache per tok
-  double kvc_t_KB = tcfg->n_layers * 2 * tcfg->n_kv_heads * tcfg->head_dim *
+  double kvc_t_KB = tcfg->nl * 2 * tcfg->nkv * tcfg->hdim *
                     sizeof(floatx) / 1024.0;
   std::println("  {:<{}}: {:.2f} KB", "kv cache (tok)", width, kvc_t_KB);
   std::println("=========================================\n");
@@ -6239,12 +6239,12 @@ main(int argc, char **argv)
   const TextConfig &tcfg = model->decoder->config;
   bool use_mm = options.enable_mm && model->support_mm;
   VisionConfig *vcfg = model->encoder ? &model->encoder->config : nullptr;
-  TextBuffer tbuf(tcfg, vcfg != nullptr, options.seqlen, options.chunk_size, use_mm, model->quant);
+  TextBuffer tb(tcfg, vcfg != nullptr, options.seqlen, options.chunk_size, use_mm, model->quant);
 
-  std::unique_ptr<VisionBuffer> vbuf;
+  std::unique_ptr<VisionBuffer> vb;
   if (use_mm)
   {
-    vbuf = std::make_unique<VisionBuffer>(*vcfg, model->quant);
+    vb = std::make_unique<VisionBuffer>(*vcfg, model->quant);
   }
 
   if (options.verbose)
@@ -6264,11 +6264,11 @@ main(int argc, char **argv)
 
   auto [prefill_elapsed, prefill_toks, gen_elapsed, gen_toks] = options.chatmode
     ? chat(
-        model.get(), &tbuf, vbuf.get(),
+        model.get(), &tb, vb.get(),
         options
       )
     : generate(
-        model.get(), &tbuf, vbuf.get(),
+        model.get(), &tb, vb.get(),
         options
       );
 
