@@ -2345,7 +2345,7 @@ typedef struct {
 } GemvJob;
 
 /* walks a flat row index across the jobs in job order */
-static inline int gemv_job_of(const GemvJob *jobs, int r, int *row) {
+static inline int gemv_job_of(std::span<const GemvJob> jobs, int r, int *row) {
   int j = 0;
   while (r >= jobs[j].m) {
     r -= jobs[j].m;
@@ -2360,10 +2360,10 @@ static inline int gemv_job_of(const GemvJob *jobs, int r, int *row) {
  * same activation vector and do not depend on each other, so they can share
  * one parallel region.
  */
-static void gemv_int8_multi(const GemvJob *jobs, int njobs,
+static void gemv_int8_multi(std::span<const GemvJob> jobs,
                             const int8_t *RESTRICT vec, floatx vsc, int n) {
   int rows = 0;
-  for (int j = 0; j < njobs; j++) {
+  for (size_t j = 0; j < jobs.size(); j++) {
     rows += jobs[j].m;
   }
 
@@ -2377,10 +2377,10 @@ static void gemv_int8_multi(const GemvJob *jobs, int njobs,
 }
 
 /** fpx flavour of gemv_int8_multi. */
-static void gemv_fpx_multi(const GemvJob *jobs, int njobs,
+static void gemv_fpx_multi(std::span<const GemvJob> jobs,
                            const floatx *RESTRICT vec, int n) {
   int rows = 0;
-  for (int j = 0; j < njobs; j++) {
+  for (size_t j = 0; j < jobs.size(); j++) {
     rows += jobs[j].m;
   }
 
@@ -3944,7 +3944,7 @@ forward_text_decode(
       GemvJob jobs[3] = {{layer.wq.fpx, NULL, tb->xq.data(), q_sz},
                          {layer.wk.fpx, NULL, tb->xk.data(), kv_sz},
                          {layer.wv.fpx, NULL, tb->xv.data(), kv_sz}};
-      gemv_fpx_multi(jobs, 3, tb->x.data(), dim);
+      gemv_fpx_multi(jobs, tb->x.data(), dim);
     }
     else
     {
@@ -3953,7 +3953,7 @@ forward_text_decode(
           {layer.wq.i8.q, layer.wq.i8.scales, tb->xq.data(), q_sz},
           {layer.wk.i8.q, layer.wk.i8.scales, tb->xk.data(), kv_sz},
           {layer.wv.i8.q, layer.wv.i8.scales, tb->xv.data(), kv_sz}};
-      gemv_int8_multi(jobs, 3, tb->x_i8.data(), x_scale, dim);
+      gemv_int8_multi(jobs, tb->x_i8.data(), x_scale, dim);
     }
     if (is_interrupted()) return 1;
 
@@ -4084,7 +4084,7 @@ forward_text_decode(
     {
       GemvJob jobs[2] = {{layer.w2.fpx, NULL, tb->xg_.data(), tc->mlp_dim},
                          {layer.w1.fpx, NULL, tb->xu.data(), tc->mlp_dim}};
-      gemv_fpx_multi(jobs, 2, tb->x.data(), dim);
+      gemv_fpx_multi(jobs, tb->x.data(), dim);
     }
     else
     {
@@ -4092,7 +4092,7 @@ forward_text_decode(
       GemvJob jobs[2] = {
           {layer.w2.i8.q, layer.w2.i8.scales, tb->xg_.data(), tc->mlp_dim},
           {layer.w1.i8.q, layer.w1.i8.scales, tb->xu.data(), tc->mlp_dim}};
-      gemv_int8_multi(jobs, 2, tb->x_i8.data(), x_scale, dim);
+      gemv_int8_multi(jobs, tb->x_i8.data(), x_scale, dim);
     }
     if (is_interrupted()) return 1;
 
