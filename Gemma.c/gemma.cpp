@@ -676,15 +676,6 @@ read_fp32_ckd(FILE *fp, float *out)
   return true;
 }
 
-template <typename T>
-static bool
-read_tensor_ckd(std::vector<T> &storage, T *&view, size_t count, FILE *fp)
-{
-  storage.resize(count);
-  view = storage.data();
-  return fread_ckd(view, count, sizeof(T), fp);
-}
-
 /* Pascal-style string: first byte is length, then that many chars */
 static bool
 read_str_ckd(char **var, FILE *fp, char *data, size_t *offset)
@@ -1151,9 +1142,6 @@ struct QTensor
     int8_t *q = nullptr;
     floatx *scales = nullptr;
   } i8;
-  std::vector<floatx> fpx_data;
-  std::vector<int8_t> q_data;
-  std::vector<floatx> scales_data;
 };
 
 /* */
@@ -1167,23 +1155,6 @@ qtensor_size(int m, int n, bool quant)
   else
   {
     return (size_t)m * n * sizeof(int8_t) + (size_t)n * sizeof(floatx);
-  }
-}
-
-// Linear layer weights: either plain floatx or int8 + per-channel scales
-static void
-read_qtensor(QTensor *w, FILE *fp, int m, int n, bool quant)
-{
-  if (!quant)
-  {
-    w->quant = false;
-    read_tensor_ckd(w->fpx_data, w->fpx, (size_t)m * (size_t)n, fp);
-  }
-  else
-  {
-    w->quant = true;
-    read_tensor_ckd(w->q_data, w->i8.q, (size_t)m * (size_t)n, fp);
-    read_tensor_ckd(w->scales_data, w->i8.scales, (size_t)n, fp);
   }
 }
 
@@ -1243,14 +1214,6 @@ struct TextDecoderLayer
   floatx *n2; /* (dim,) */
   floatx *n3; /* (dim,) */
   floatx *n4; /* (dim,) */
-
-  // Storage is empty when the corresponding pointer borrows mmap memory.
-  std::vector<floatx> nq_data;
-  std::vector<floatx> nk_data;
-  std::vector<floatx> n1_data;
-  std::vector<floatx> n2_data;
-  std::vector<floatx> n3_data;
-  std::vector<floatx> n4_data;
 };
 
 /* one SigLIP (vision) encoder block */
@@ -1277,18 +1240,6 @@ struct VisionEncoderLayer
   floatx *n2;   /* (dim,) */
   floatx *n1_b; /* (dim,) */
   floatx *n2_b; /* (dim,) */
-
-  // Storage is empty when the corresponding pointer borrows mmap memory.
-  std::vector<floatx> bq_data;
-  std::vector<floatx> bk_data;
-  std::vector<floatx> bv_data;
-  std::vector<floatx> bo_data;
-  std::vector<floatx> b1_data;
-  std::vector<floatx> b2_data;
-  std::vector<floatx> n1_data;
-  std::vector<floatx> n2_data;
-  std::vector<floatx> n1_b_data;
-  std::vector<floatx> n2_b_data;
 };
 
 /* Text decoder container */
@@ -1299,9 +1250,6 @@ struct TextDecoder
   QTensor emb;
   std::vector<TextDecoderLayer> layers;
   floatx *fnorm; /* (dim,) */
-
-  // Storage is empty when the corresponding pointer borrows mmap memory.
-  std::vector<floatx> fnorm_data;
 };
 
 /* */
@@ -1357,85 +1305,6 @@ get_text_decoder_size(const TextConfig *tcfg, bool quant)
   size += (size_t)dim * sizeof(floatx);
 
   return size;
-}
-
-/* */
-static std::unique_ptr<TextDecoder>
-read_text_decoder(FILE *fp, TextConfig *tc, bool quant)
-{
-  auto dec = std::make_unique<TextDecoder>();
-  int dim = tc->dim;
-  int mlp_dim = tc->mlp_dim;
-  int q_sz = tc->n_heads * tc->hdim;
-  int kv_sz = tc->nkv * tc->hdim;
-  int nvocab = tc->nvocab;
-  dec->config = *tc;
-
-  /* the embedding shape is (nvocab, dim), but it uses per-tensor
-   * quantization rather than per-channel like other weights. gemma uses tied
-   * weights, which means the final lm_head shares the same weights with the
-   * embedding table, but transposed. so it becomes per-channel quantization in
-   * the final lm_head. */
-
-  read_qtensor(&dec->emb, fp, dim, nvocab, quant);
-  dec->layers.resize(tc->nl);
-
-  /* read all the layers */
-  for (auto &layer : dec->layers)
-  {
-    /* attention weights */
-    read_qtensor(&layer.wq, fp, dim, q_sz, quant);
-    read_qtensor(&layer.wk, fp, dim, kv_sz, quant);
-    read_qtensor(&layer.wv, fp, dim, kv_sz, quant);
-    read_qtensor(&layer.wo, fp, q_sz, dim, quant);
-
-    if (tc->qk_norm)
-    {
-      /* QK RMSNorms */
-      if (!read_tensor_ckd(layer.nq_data, layer.nq, tc->hdim, fp) ||
-          !read_tensor_ckd(layer.nk_data, layer.nk, tc->hdim, fp))
-        return nullptr;
-    }
-    else
-    {
-      layer.nq = NULL;
-      layer.nk = NULL;
-    }
-
-    /* feedforward weights */
-    read_qtensor(&layer.w1, fp, dim, mlp_dim, quant);
-    read_qtensor(&layer.w2, fp, dim, mlp_dim, quant);
-    read_qtensor(&layer.w3, fp, mlp_dim, dim, quant);
-    if (
-      /* RMSNorm weights */
-      !read_tensor_ckd(layer.n1_data, layer.n1, dim, fp) ||
-      !read_tensor_ckd(layer.n2_data, layer.n2, dim, fp))
-      return nullptr;
-
-    if (tc->mlp_pre)
-    {
-      if (!read_tensor_ckd(layer.n3_data, layer.n3, dim, fp))
-        return nullptr;
-    }
-    else
-    {
-      layer.n3 = NULL;
-    }
-    if (tc->mlp_pst)
-    {
-      if (!read_tensor_ckd(layer.n4_data, layer.n4, dim, fp))
-        return nullptr;
-    }
-    else
-    {
-      layer.n4 = NULL;
-    }
-  }
-
-  if (!read_tensor_ckd(dec->fnorm_data, dec->fnorm, dim, fp))
-    return nullptr;
-
-  return dec;
 }
 
 /* */
@@ -1527,13 +1396,6 @@ struct VisionEncoder
   floatx *post_nb; /* (dim,) */
   floatx *norm;    /* (dim,) */
   QTensor proj;   /* (dim, dim) */
-
-  // Storage is empty when the corresponding pointer borrows mmap memory.
-  std::vector<floatx> patch_emb_data;
-  std::vector<floatx> patch_emb_b_data;
-  std::vector<floatx> post_norm_data;
-  std::vector<floatx> post_norm_b_data;
-  std::vector<floatx> norm_data;
 };
 
 size_t get_vision_encoder_size(const VisionConfig *vc, const TextConfig *tc,
@@ -1595,64 +1457,6 @@ size_t get_vision_encoder_size(const VisionConfig *vc, const TextConfig *tc,
   size += qtensor_size(dim, tc->dim, quant);
 
   return size;
-}
-
-/* */
-static VisionEncoder *
-read_vision_encoder(FILE *fp, TextConfig *tcfg, VisionConfig *vcfg, bool quant)
-{
-  auto enc = std::make_unique<VisionEncoder>();
-  int P = vcfg->psize;
-  int dim = vcfg->dim;
-  int mlp_dim = vcfg->mlp_dim;
-  int n_patches = vcfg->img_px / P;
-
-  enc->config = *vcfg;
-
-  n_patches *= n_patches;
-
-  read_tensor_ckd(enc->patch_emb_data, enc->pe, (size_t)dim * 3 * P * P, fp);
-  read_tensor_ckd(enc->patch_emb_b_data, enc->pe_b, (size_t)dim, fp);
-  /* same as here, the real shape is (npatch, dim) */
-  read_qtensor(&enc->pos_emb, fp, dim, n_patches, quant);
-  enc->layers.resize(vcfg->nl);
-
-  // Read all the layers of ViT
-  for (auto &layer : enc->layers)
-  {
-    /* first LayerNorm */
-    read_tensor_ckd(layer.n1_data, layer.n1, (size_t)dim, fp);
-    read_tensor_ckd(layer.n1_b_data, layer.n1_b, (size_t)dim, fp);
-    /* attention weights */
-    read_qtensor(&layer.wq, fp, dim, dim, quant);
-    read_qtensor(&layer.wk, fp, dim, dim, quant);
-    read_qtensor(&layer.wv, fp, dim, dim, quant);
-    read_qtensor(&layer.wo, fp, dim, dim, quant);
-    /* attention biases */
-    read_tensor_ckd(layer.bq_data, layer.bq, (size_t)dim, fp);
-    read_tensor_ckd(layer.bk_data, layer.bk, (size_t)dim, fp);
-    read_tensor_ckd(layer.bv_data, layer.bv, (size_t)dim, fp);
-    read_tensor_ckd(layer.bo_data, layer.bo, (size_t)dim, fp);
-    /* second LayerNorm */
-    read_tensor_ckd(layer.n2_data, layer.n2, (size_t)dim, fp);
-    read_tensor_ckd(layer.n2_b_data, layer.n2_b, (size_t)dim, fp);
-    /* feedforward weights */
-    read_qtensor(&layer.w1, fp, dim, mlp_dim, quant);
-    read_qtensor(&layer.w2, fp, mlp_dim, dim, quant);
-    /* feedforward biases */
-    read_tensor_ckd(layer.b1_data, layer.b1, (size_t)mlp_dim, fp);
-    read_tensor_ckd(layer.b2_data, layer.b2, (size_t)dim, fp);
-  }
-
-  /* post layernorm */
-  read_tensor_ckd(enc->post_norm_data, enc->post_n, (size_t)dim, fp);
-  read_tensor_ckd(enc->post_norm_b_data, enc->post_nb, (size_t)dim, fp);
-  /* soft embedding RMSNorm */
-  read_tensor_ckd(enc->norm_data, enc->norm, (size_t)dim, fp);
-  /* final projection */
-  read_qtensor(&enc->proj, fp, dim, tcfg->dim, quant);
-
-  return enc.release();
 }
 
 /* */
@@ -1731,6 +1535,7 @@ struct GemmaModel
 {
   // Keep the mapped weights alive until all borrowers have been destroyed.
   std::optional<io::mapped_region> mapped_weights;
+  std::vector<std::byte> weights;
   std::unique_ptr<TextDecoder> decoder;
   std::unique_ptr<VisionEncoder> encoder;
   std::unique_ptr<GemmaTokenizer> tokenizer;
@@ -1779,8 +1584,6 @@ mmap_gemma_model(const char *filename, bool enable_mm)
   std::unique_ptr<VisionConfig> vcfg;
   int quant = -1;
   bool use_mm = false;
-  long offset_l = 0;
-  size_t offset = 0;
   size_t mapping_size = 0;
   if (fp == NULL)
   {
@@ -1817,13 +1620,13 @@ mmap_gemma_model(const char *filename, bool enable_mm)
   model->tokenizer = read_tokenizer(fp, tcfg.get(), model->support_mm);
   if (!model->tokenizer) return nullptr;
 
-  offset_l = ftell(fp);
+  const long offset_l = ftell(fp);
   if (offset_l < 0)
   {
-    log_error("ftell failed");
+    log_error("ftell failed: %s", filename);
     return nullptr;
   }
-  offset = (size_t)offset_l;
+  const size_t offset = static_cast<size_t>(offset_l);
 
   auto mapped_file = io::mapped_file::open(filename, io::file_access::read);
   if (!mapped_file)
@@ -1880,7 +1683,6 @@ read_gemma_model(const char *filename, bool enable_mm)
   std::unique_ptr<VisionConfig> vcfg;
   int quant = -1;
   bool use_mm = false;
-  std::unique_ptr<TextDecoder> dec;
   if (fp == NULL)
   {
     log_error("failed to open file: %s", filename);
@@ -1916,22 +1718,31 @@ read_gemma_model(const char *filename, bool enable_mm)
   model->tokenizer = read_tokenizer(fp, tcfg.get(), model->support_mm);
   if (!model->tokenizer) return nullptr;
 
-  // Text decoder
-  dec = read_text_decoder(fp, tcfg.get(), model->quant);
-  if (dec == NULL) return nullptr;
-  model->decoder = std::move(dec);
-  tcfg.release();
-
-  // Vision encoder
+  size_t weights_size = get_text_decoder_size(tcfg.get(), model->quant);
   if (use_mm)
-  {
-    VisionEncoder *enc =
-      read_vision_encoder(fp, &dec->config, vcfg.get(), model->quant);
-    if (enc == NULL) return nullptr;
-    model->encoder.reset(enc);
-    vcfg.release();
-  }
+    weights_size += get_vision_encoder_size(vcfg.get(), tcfg.get(), model->quant);
 
+  model->weights.resize(weights_size);
+  if (!fread_ckd(model->weights.data(), model->weights.size(), 1, fp))
+    return nullptr;
+
+  IoReader reader{model->weights};
+
+  try
+  {
+    model->decoder.reset(mmap_text_decoder(reader, tcfg.get(), model->quant));
+    if (use_mm)
+    {
+      model->encoder.reset(
+        mmap_vision_encoder(reader, &model->decoder->config, vcfg.get(), model->quant)
+      );
+    }
+  }
+  catch (const std::out_of_range &error)
+  {
+    log_error("failed to read model weights: %s: %s", filename, error.what());
+    return nullptr;
+  }
   return model;
 }
 
