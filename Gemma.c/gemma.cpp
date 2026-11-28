@@ -129,6 +129,7 @@
 #include <algorithm>
 #include <array>
 #include <compare>
+#include <cstddef>
 #include <functional>
 #include <mdspan>
 #include <memory>
@@ -1186,23 +1187,36 @@ read_qtensor(QTensor *w, FILE *fp, int m, int n, bool quant)
   }
 }
 
-/* */
-static inline void
-mmap_qtensor(QTensor *w, uint8_t *base, size_t *off, int m, int n, bool quant)
+struct IoReader
 {
-  if (!quant)
+  std::span<std::byte> datas;
+
+  // Borrow mapped elements and advance to the next field.
+  template <class T>
+  T *read(size_t count)
   {
-    w->quant = false;
-    w->fpx   = (floatx *)(base + *off);
-    *off += (size_t)m * n * sizeof(floatx);
+    if (count > datas.size() / sizeof(T))
+      throw std::out_of_range("mapped model weights are truncated");
+
+    auto *elements = reinterpret_cast<T *>(datas.data());
+    datas = datas.subspan(count * sizeof(T));
+    return elements;
+  }
+};
+
+static inline void
+mmap_qtensor(QTensor *w, IoReader &reader, int m, int n, bool quant)
+{
+  const size_t count = static_cast<size_t>(m) * n;
+  w->quant = quant;
+  if (quant)
+  {
+    w->i8.q = reader.read<int8_t>(count);
+    w->i8.scales = reader.read<floatx>(n);
   }
   else
   {
-    w->quant = true;
-    w->i8.q  = (int8_t *)(base + *off);
-    *off += (size_t)m * n * sizeof(int8_t);
-    w->i8.scales = (floatx *)(base + *off);
-    *off += (size_t)n * sizeof(floatx);
+    w->fpx = reader.read<floatx>(count);
   }
 }
 
@@ -1426,10 +1440,9 @@ read_text_decoder(FILE *fp, TextConfig *tc, bool quant)
 
 /* */
 static TextDecoder *
-mmap_text_decoder(void *data, TextConfig *tc, size_t *offset, bool quant)
+mmap_text_decoder(IoReader &reader, TextConfig *tc, bool quant)
 {
   auto dec = std::make_unique<TextDecoder>();
-  uint8_t *base = (uint8_t *)data;
   int dim = tc->dim;
   int mlp_dim = tc->mlp_dim;
   int q_sz = tc->n_heads * tc->hdim;
@@ -1438,7 +1451,7 @@ mmap_text_decoder(void *data, TextConfig *tc, size_t *offset, bool quant)
   dec->config = *tc;
 
   /* embedding: linear (dim -> nvocab) */
-  mmap_qtensor(&dec->emb, base, offset, dim, nvocab, quant);
+  mmap_qtensor(&dec->emb, reader, dim, nvocab, quant);
 
   /* layers array */
   dec->layers.resize(tc->nl);
@@ -1446,18 +1459,16 @@ mmap_text_decoder(void *data, TextConfig *tc, size_t *offset, bool quant)
   for (auto &layer : dec->layers)
   {
     /* attention weights */
-    mmap_qtensor(&layer.wq, base, offset, dim, q_sz, quant);
-    mmap_qtensor(&layer.wk, base, offset, dim, kv_sz, quant);
-    mmap_qtensor(&layer.wv, base, offset, dim, kv_sz, quant);
-    mmap_qtensor(&layer.wo, base, offset, q_sz, dim, quant);
+    mmap_qtensor(&layer.wq, reader, dim, q_sz, quant);
+    mmap_qtensor(&layer.wk, reader, dim, kv_sz, quant);
+    mmap_qtensor(&layer.wv, reader, dim, kv_sz, quant);
+    mmap_qtensor(&layer.wo, reader, q_sz, dim, quant);
 
     /* QK normalization (optional) */
     if (tc->qk_norm)
     {
-      layer.nq = (floatx *)(base + *offset);
-      *offset += (size_t)tc->hdim * sizeof(floatx);
-      layer.nk = (floatx *)(base + *offset);
-      *offset += (size_t)tc->hdim * sizeof(floatx);
+      layer.nq = reader.read<floatx>(tc->hdim);
+      layer.nk = reader.read<floatx>(tc->hdim);
     }
     else
     {
@@ -1466,21 +1477,18 @@ mmap_text_decoder(void *data, TextConfig *tc, size_t *offset, bool quant)
     }
 
     /* feedforward weights */
-    mmap_qtensor(&layer.w1, base, offset, dim, mlp_dim, quant);
-    mmap_qtensor(&layer.w2, base, offset, dim, mlp_dim, quant);
-    mmap_qtensor(&layer.w3, base, offset, mlp_dim, dim, quant);
+    mmap_qtensor(&layer.w1, reader, dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w2, reader, dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w3, reader, mlp_dim, dim, quant);
 
     /* RMSNorm weights */
-    layer.n1 = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
-    layer.n2 = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
+    layer.n1 = reader.read<floatx>(dim);
+    layer.n2 = reader.read<floatx>(dim);
 
     /* optional pre/post MLP norms */
     if (tc->mlp_pre)
     {
-      layer.n3 = (floatx *)(base + *offset);
-      *offset += (size_t)dim * sizeof(floatx);
+      layer.n3 = reader.read<floatx>(dim);
     }
     else
     {
@@ -1489,8 +1497,7 @@ mmap_text_decoder(void *data, TextConfig *tc, size_t *offset, bool quant)
 
     if (tc->mlp_pst)
     {
-      layer.n4 = (floatx *)(base + *offset);
-      *offset += (size_t)dim * sizeof(floatx);
+      layer.n4 = reader.read<floatx>(dim);
     }
     else
     {
@@ -1500,8 +1507,7 @@ mmap_text_decoder(void *data, TextConfig *tc, size_t *offset, bool quant)
   }
 
   /* final norm */
-  dec->fnorm = (floatx *)(base + *offset);
-  *offset += (size_t)dim * sizeof(floatx);
+  dec->fnorm = reader.read<floatx>(dim);
 
   return dec.release();
 }
@@ -1652,11 +1658,10 @@ read_vision_encoder(FILE *fp, TextConfig *tcfg, VisionConfig *vcfg, bool quant)
 /* */
 static VisionEncoder *
 mmap_vision_encoder(
-  void *data, TextConfig *tc, VisionConfig *vc, size_t *offset, bool quant
+  IoReader &reader, TextConfig *tc, VisionConfig *vc, bool quant
 )
 {
   auto enc = std::make_unique<VisionEncoder>();
-  uint8_t *base = (uint8_t *)data;
   int P = vc->psize;
   int dim = vc->dim;
   int mlp_dim = vc->mlp_dim;
@@ -1666,15 +1671,13 @@ mmap_vision_encoder(
   npatch *= npatch;
 
   /* pe: dim * 3 * P * P floats */
-  enc->pe = (floatx *)(base + *offset);
-  *offset += (size_t)dim * 3 * P * P * sizeof(floatx);
+  enc->pe = reader.read<floatx>(static_cast<size_t>(dim) * 3 * P * P);
 
   /* pe_b: dim floats */
-  enc->pe_b = (floatx *)(base + *offset);
-  *offset += (size_t)dim * sizeof(floatx);
+  enc->pe_b = reader.read<floatx>(dim);
 
   /* pos_emb: linear (dim -> npatch) */
-  mmap_qtensor(&enc->pos_emb, base, offset, dim, npatch, quant);
+  mmap_qtensor(&enc->pos_emb, reader, dim, npatch, quant);
 
   /* layers array */
   enc->layers.resize(vc->nl);
@@ -1682,56 +1685,43 @@ mmap_vision_encoder(
   for (auto &layer : enc->layers)
   {
     /* n1, n1_b */
-    layer.n1 = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
-    layer.n1_b = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
+    layer.n1 = reader.read<floatx>(dim);
+    layer.n1_b = reader.read<floatx>(dim);
 
     /* attention weights: wq, wk, wv, wo (linear dim -> dim) */
-    mmap_qtensor(&layer.wq, base, offset, dim, dim, quant);
-    mmap_qtensor(&layer.wk, base, offset, dim, dim, quant);
-    mmap_qtensor(&layer.wv, base, offset, dim, dim, quant);
-    mmap_qtensor(&layer.wo, base, offset, dim, dim, quant);
+    mmap_qtensor(&layer.wq, reader, dim, dim, quant);
+    mmap_qtensor(&layer.wk, reader, dim, dim, quant);
+    mmap_qtensor(&layer.wv, reader, dim, dim, quant);
+    mmap_qtensor(&layer.wo, reader, dim, dim, quant);
 
     /* attention biases: bq, bk, bv, bo */
-    layer.bq = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
-    layer.bk = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
-    layer.bv = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
-    layer.bo = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
+    layer.bq = reader.read<floatx>(dim);
+    layer.bk = reader.read<floatx>(dim);
+    layer.bv = reader.read<floatx>(dim);
+    layer.bo = reader.read<floatx>(dim);
 
     /* n2, n2_b */
-    layer.n2 = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
-    layer.n2_b = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
+    layer.n2 = reader.read<floatx>(dim);
+    layer.n2_b = reader.read<floatx>(dim);
 
     /* feedforward weights: w1 (dim -> mlp_dim), w2 (mlp_dim -> dim) */
-    mmap_qtensor(&layer.w1, base, offset, dim, mlp_dim, quant);
-    mmap_qtensor(&layer.w2, base, offset, mlp_dim, dim, quant);
+    mmap_qtensor(&layer.w1, reader, dim, mlp_dim, quant);
+    mmap_qtensor(&layer.w2, reader, mlp_dim, dim, quant);
 
     /* feedforward biases: b1 (mlp_dim), b2 (dim) */
-    layer.b1 = (floatx *)(base + *offset);
-    *offset += (size_t)mlp_dim * sizeof(floatx);
-    layer.b2 = (floatx *)(base + *offset);
-    *offset += (size_t)dim * sizeof(floatx);
+    layer.b1 = reader.read<floatx>(mlp_dim);
+    layer.b2 = reader.read<floatx>(dim);
   }
 
   /* post_n, post_nb */
-  enc->post_n = (floatx *)(base + *offset);
-  *offset += (size_t)dim * sizeof(floatx);
-  enc->post_nb = (floatx *)(base + *offset);
-  *offset += (size_t)dim * sizeof(floatx);
+  enc->post_n = reader.read<floatx>(dim);
+  enc->post_nb = reader.read<floatx>(dim);
 
   /* norm */
-  enc->norm = (floatx *)(base + *offset);
-  *offset += (size_t)dim * sizeof(floatx);
+  enc->norm = reader.read<floatx>(dim);
 
   /* proj: linear (dim -> dim) */
-  mmap_qtensor(&enc->proj, base, offset, dim, tc->dim, quant);
+  mmap_qtensor(&enc->proj, reader, dim, tc->dim, quant);
 
   return enc.release();
 }
@@ -1789,11 +1779,9 @@ mmap_gemma_model(const char *filename, bool enable_mm)
   std::unique_ptr<VisionConfig> vcfg;
   int quant = -1;
   bool use_mm = false;
-  TextDecoder *dec = nullptr;
   long offset_l = 0;
   size_t offset = 0;
   size_t mapping_size = 0;
-  void *data = nullptr;
   if (fp == NULL)
   {
     log_error("failed to open file: %s", filename);
@@ -1860,22 +1848,22 @@ mmap_gemma_model(const char *filename, bool enable_mm)
     return nullptr;
   }
   model->mapped_weights.emplace(std::move(*region));
-  data = model->mapped_weights->data();
+  IoReader reader{model->mapped_weights->bytes().subspan(offset)};
 
-  /* text decoder */
-  dec = mmap_text_decoder(data, tcfg.get(), &offset, model->quant);
-  if (dec == NULL) return nullptr;
-  model->decoder.reset(dec);
-  tcfg.release();
-
-  /* vision encoder */
-  if (use_mm)
+  try
   {
-    VisionEncoder *enc =
-      mmap_vision_encoder(data, &dec->config, vcfg.get(), &offset, model->quant);
-    if (enc == NULL) return nullptr;
-    model->encoder.reset(enc);
-    vcfg.release();
+    model->decoder.reset(mmap_text_decoder(reader, tcfg.get(), model->quant));
+    if (use_mm)
+    {
+      model->encoder.reset(
+        mmap_vision_encoder(reader, &model->decoder->config, vcfg.get(), model->quant)
+      );
+    }
+  }
+  catch (const std::out_of_range &error)
+  {
+    log_error("failed to read mapped model weights: %s: %s", filename, error.what());
+    return nullptr;
   }
 
   return model;
